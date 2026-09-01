@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "AI Tab Translator & Dubber",
+  "version": "0.1.0",
+  "description": "Real-time AI translation, live subtitles and dubbing for any tab's audio using your own Gemini API key. Everything runs in your browser.",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "tabCapture",
+    "storage",
+    "scripting",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/index.html",
+    "default_title": "AI Tab Translator"
+  },
+  "options_ui": {
+    "page": "settings/index.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "minimum_chrome_version": "116"
+}
