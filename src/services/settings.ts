@@ -2,6 +2,7 @@ import type { AppSettings, TranslationResult } from '../types';
 
 const SETTINGS_KEY = 'settings';
 const SEGMENTS_KEY = 'segments';
+export const LIVE_TRANSLATE_MODEL = 'gemini-3.5-live-translate-preview';
 
 export const DEFAULT_SETTINGS: AppSettings = {
   geminiApiKey: '',
@@ -10,7 +11,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sttModel: 'gemini-3.5-transcribe',
   translationModel: 'gemini-2.5-flash',
   liveTranslateEnabled: true,
-  liveTranslateModel: 'gemini-3.5-live-translate-preview',
+  liveTranslateModel: LIVE_TRANSLATE_MODEL,
   interimIntervalMs: 3500,
   silenceThresholdMs: 700,
   maxSegmentMs: 15000,
@@ -31,6 +32,9 @@ export async function getSettings(): Promise<AppSettings> {
     ...DEFAULT_SETTINGS,
     ...saved,
     mode: 'voice',
+    // Keep the model field for future multi-model support, but use the
+    // currently supported live translation model exclusively for now.
+    liveTranslateModel: LIVE_TRANSLATE_MODEL,
   } as AppSettings;
   // Older builds stored volume as a percentage (or an invalid slider value).
   merged.originalVolume = normalizeVolume(merged.originalVolume, DEFAULT_SETTINGS.originalVolume);
@@ -51,6 +55,7 @@ export async function saveSettings(patch: Partial<AppSettings>): Promise<AppSett
   const next: AppSettings = {
     ...current,
     ...patch,
+    liveTranslateModel: LIVE_TRANSLATE_MODEL,
   };
   await chrome.storage.local.set({ [SETTINGS_KEY]: next });
   return next;

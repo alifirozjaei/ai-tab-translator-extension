@@ -3,5 +3,70 @@
 @tailwind utilities;
 
 body {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  margin: 0;
+  min-width: 360px;
+  background: #0b0814;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button, input, select { font: inherit; }
+
+.popup-shell { min-height: 100%; letter-spacing: -0.005em; }
+.logo-mark {
+  position: relative; display: flex; height: 28px; width: 28px; align-items: center; justify-content: center; gap: 2px;
+  overflow: hidden; border-radius: 9px; background: linear-gradient(135deg, #a855f7, #6366f1 58%, #3b82f6);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, .22);
+}
+.logo-mark i { display: block; width: 2px; border-radius: 3px; background: rgba(255,255,255,.9); }
+.logo-mark i:nth-child(1) { height: 6px; }
+.logo-mark i:nth-child(2) { height: 11px; }
+.logo-mark i:nth-child(3) { height: 8px; }
+.logo-mark b { position: absolute; right: 2px; bottom: 1px; color: rgba(255,255,255,.8); font-size: 8px; font-weight: 700; line-height: 1; }
+.settings-section {
+  padding: 7px 2px 8px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.section-icon { display: block; width: 15px; height: 15px; flex: 0 0 15px; color: #c4a7ff; }
+.field-label { display: block; color: #ded6e7; font-size: 12px; font-weight: 500; }
+.field-label .value-badge { float: right; color: #c4a7ff; font-size: 11px; font-variant-numeric: tabular-nums; }
+.api-link { color: #b48cff; font-size: 10px; text-decoration: none; transition: color 150ms ease; }
+.api-link:hover { color: #d2b8ff; text-decoration: underline; }
+.control-button:focus-visible, .primary-button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid rgba(129, 140, 248, .8); outline-offset: 2px; }
+select { color-scheme: dark; }
+.volume-slider { display: block; width: 100%; height: 16px; cursor: pointer; accent-color: #a855f7; }
+.volume-slider:disabled { cursor: not-allowed; opacity: .35; }
+.audio-control-row { display: flex; min-width: 0; align-items: center; gap: 9px; }
+.audio-control-row .volume-slider { min-width: 0; flex: 1 1 auto; }
+.mute-checkbox { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; color: #94a3b8; font-size: 10px; white-space: nowrap; }
+.mute-checkbox input { width: 13px; height: 13px; margin: 0; accent-color: #a855f7; }
+.mute-checkbox:focus-within { color: #ddd6fe; }
+.primary-button { box-shadow: none; }
+.status-dot { font-weight: 600; }
+.status-dot span { font-size: 9px; }
+.popup-meta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 16px;
+  color: #64748b;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.meta-divider { height: 11px; width: 1px; background: rgba(148, 163, 184, .18); }
+.local-note { color: #7c6b91; }
+
+@media (max-width: 380px) {
+  body { min-width: 340px; }
+  .popup-shell { width: 100%; }
 }

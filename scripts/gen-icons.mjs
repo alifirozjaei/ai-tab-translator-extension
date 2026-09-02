@@ -57,22 +57,27 @@ function encodePng(width, height, pixelFn) {
 
 function pixel(x, y, w, h) {
   const t = (x + y) / (w + h - 2);
-  const r = Math.round(99 + t * (129 - 99));
-  const g = Math.round(102 + t * (140 - 102));
-  const b = Math.round(241 + t * (248 - 241));
-  const cx = w / 2;
-  const cy = h / 2;
-  const dx = x - cx;
-  const dy = y - cy;
-  const dist = Math.sqrt(dx * dx + dy * dy);
-  const radius = w * 0.3;
-  if (dist < radius - w * 0.04) {
-    return [255, 255, 255, 255];
+  const r = Math.round(168 - t * 69);
+  const g = Math.round(85 + t * 17);
+  const b = Math.round(247 - t * 6);
+  const inset = Math.max(1, Math.round(w * 0.08));
+  const radius = Math.max(2, Math.round(w * 0.2));
+  const inside = x >= inset && x < w - inset && y >= inset && y < h - inset;
+  const nearCorner = (x < inset + radius && y < inset + radius) ||
+    (x >= w - inset - radius && y < inset + radius) ||
+    (x < inset + radius && y >= h - inset - radius) ||
+    (x >= w - inset - radius && y >= h - inset - radius);
+  if (!inside || nearCorner) return [11, 8, 20, 255];
+
+  const barWidth = Math.max(1, Math.round(w * 0.08));
+  const bars = [0.34, 0.5, 0.66];
+  for (let i = 0; i < bars.length; i++) {
+    const bx = Math.round(w * bars[i]);
+    const height = Math.round(w * [0.18, 0.34, 0.24][i]);
+    if (Math.abs(x - bx) <= barWidth && y >= h / 2 - height && y <= h / 2 + height) return [255, 255, 255, 255];
   }
-  if (dist < radius) {
-    return [r, g, b, 255];
-  }
-  return [15, 23, 42, 255];
+  if (w >= 32 && x > w * 0.68 && y > h * 0.68 && (Math.abs(y - (h * 0.82)) < w * 0.06 || Math.abs(x - (w * 0.82)) < w * 0.06)) return [255, 255, 255, 230];
+  return [r, g, b, 255];
 }
 
 export async function generateIcons(dir) {
