@@ -1,7 +1,7 @@
-# AI Tab Translator & Dubber (Chrome Extension)
+# LiveDub — AI Audio Translator
 
-A **personal-use** Chrome extension that provides real-time AI translation, live
-subtitles, and voice dubbing for any audio/video playing in a tab.
+A browser extension that provides real-time AI voice translation for audio/video
+playing in a tab.
 
 It runs **entirely in your browser**. There is no backend, no accounts, no
 tracking, and no cloud storage. All AI requests are sent directly from your
@@ -23,26 +23,19 @@ browser to the AI provider using **your own API key**.
   language (Gemini).
 - **Voice dubbing** — reads the translated text aloud using the browser's
   built-in `speechSynthesis` engine.
-- **Live subtitle overlay** — injected into the page, showing the translation
-  (and optionally the original text), with adjustable font size, position,
-  background, and opacity.
-- **Three modes**:
-  1. **Subtitles only**
-  2. **Translated voice** (mutes the original)
-  3. **Voice + subtitles** (default)
-- **Export** — download your session as **SRT** or **VTT**.
-- **Settings** — manage your API key, default language, and subtitle
-  appearance, all stored only in `chrome.storage.local`.
+- **Audio controls** — independently adjust translated/original audio and mute
+  the original track.
+- **Settings** — manage your API key and target language, stored locally.
 
 ---
 
 ## Architecture
 
 ```
-Chrome Tab Audio
+Browser Tab Audio
      │
      ▼
-Audio Capture Layer      (chrome.tabCapture → AudioWorklet VAD/segmentation)
+Audio Capture Layer      (browser adapter → AudioWorklet VAD/segmentation)
      │
      ▼
 Speech Recognition API  (Google Gemini inline audio → transcript)
@@ -57,11 +50,25 @@ Text-To-Speech          (browser speechSynthesis in the content script)
 Audio Playback + Subtitle Overlay (React overlay injected into the page)
 ```
 
+### Browser targets
+
+The application code is shared. Browser-specific behavior is isolated in
+`src/platform/browser.ts`, the browser manifests, and the capture branch:
+
+- Chrome and Edge use Manifest V3, `tabCapture`, and `offscreen`.
+- Firefox uses a persistent Manifest V2 background page and its audio/display
+  capture fallback because Firefox does not support Chrome's MV3 service-worker
+  and offscreen combination.
+
+Firefox may show a browser capture picker when starting a session. This is a
+browser platform limitation of tab-audio capture, not a separate translation
+pipeline.
+
 ### Extension parts
 
 | Part | Path | Role |
 |------|------|------|
-| Service worker | `src/background/service-worker.ts` | Orchestrates start/stop, offscreen doc, tab muting, relay. |
+| Background | `src/background/service-worker.ts` | Orchestrates start/stop, capture lifecycle, relay. |
 | Offscreen audio engine | `src/offscreen/main.ts` | Captures tab audio, runs VAD, calls STT + translation. |
 | AudioWorklet | `src/audio/processor.ts` | 16 kHz downmix + voice-activity/silence segmentation. |
 | Content script | `src/content/main.tsx` + `subtitle-overlay.tsx` | Injects the subtitle overlay and plays dubbed speech. |
@@ -86,24 +93,26 @@ cd ai-tab-translator-extension
 npm install
 ```
 
-### 2. Build
+### 2. Build packages
 
 ```bash
-npm run build
+npm run build:all
 ```
 
-Output goes to `dist/`. This runs:
-- `vite build` (popup, settings, offscreen pages + service worker + AudioWorklet)
-- `vite build --config vite.content.config.ts` (content script as a self-contained IIFE)
-- icon generation and HTML relocation
+Output goes to `release/` with one unpacked directory and one zip per browser:
+
+- `npm run build:chrome` — `release/chrome/` and `livedub-chrome-v*.zip`
+- `npm run build:edge` — `release/edge/` and `livedub-edge-v*.zip`
+- `npm run build:firefox` — `release/firefox/` and `livedub-firefox-v*.zip`
+- `npm run build:all` — all three packages
 
 ### 3. Load the extension in Chrome
 
-1. Open `chrome://extensions`.
+1. Open the extensions manager for your browser.
 2. Enable **Developer mode** (top-right toggle).
 3. Click **Load unpacked**.
 4. Select the `dist/` folder.
-5. Pin the **AI Tab Translator** icon from the extensions menu.
+5. Pin the **LiveDub** icon from the extensions menu.
 
 > Rebuild (`npm run build`) and click the **reload** ↻ icon on the extension
 > card after any code change.

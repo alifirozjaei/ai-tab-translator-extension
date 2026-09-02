@@ -6,6 +6,7 @@ import { logger, describeError } from '../services/logger';
 import { RateLimiter, withRetry } from '../services/rateLimiter';
 import { LiveTranslateSession } from '../services/liveTranslate';
 import type { AppSettings, TranslationResult } from '../types';
+import { browserApi, hasTabCapture } from '../platform/browser';
 
 const statusEl = document.getElementById('status');
 const logEl = document.getElementById('log');
@@ -42,9 +43,9 @@ function limiter(model: string, perMinute: number): RateLimiter {
   return lim;
 }
 
-chrome.runtime.sendMessage({ type: 'OFFSCREEN_READY' }).catch(() => {});
+browserApi.runtime.sendMessage({ type: 'OFFSCREEN_READY' }).catch(() => {});
 
-chrome.runtime.onMessage.addListener((message: any) => {
+browserApi.runtime.onMessage.addListener((message: any) => {
   if (message?.type === 'START_CAPTURE') {
     const streamId = (message.streamId as string | undefined) ?? '';
     startCapture(message.settings as AppSettings, streamId).catch((error) => reportError(error));
@@ -57,10 +58,10 @@ chrome.runtime.onMessage.addListener((message: any) => {
   }
 });
 
-chrome.tabCapture?.onStatusChanged?.addListener((info) => {
+browserApi.tabCapture?.onStatusChanged?.addListener((info) => {
   if (info.status === 'stopped' && running) {
     stopCapture();
-    chrome.runtime.sendMessage({ type: 'STATUS', state: 'idle' }).catch(() => {});
+    browserApi.runtime.sendMessage({ type: 'STATUS', state: 'idle' }).catch(() => {});
   }
 });
 
@@ -94,7 +95,7 @@ async function startLiveTranslate(settings: AppSettings): Promise<void> {
   audioCtx = ctx;
   const source = ctx.createMediaStreamSource(mediaStream!);
 
-  await ctx.audioWorklet.addModule(chrome.runtime.getURL('live-processors.js'));
+  await ctx.audioWorklet.addModule(browserApi.runtime.getURL('live-processors.js'));
   log('live-processors.js module loaded');
 
   const pcmNode = new AudioWorkletNode(ctx, 'pcm-stream', {
@@ -155,7 +156,7 @@ async function startLiveTranslate(settings: AppSettings): Promise<void> {
 
   setStatus('active');
   log('capture active (live translate)');
-  chrome.runtime.sendMessage({ type: 'STATUS', state: 'active' }).catch(() => {});
+  browserApi.runtime.sendMessage({ type: 'STATUS', state: 'active' }).catch(() => {});
 }
 
 function sendLiveChunk(i16: Int16Array): void {
@@ -174,7 +175,7 @@ async function startRestPipeline(settings: AppSettings): Promise<void> {
   audioCtx = ctx;
   const source = ctx.createMediaStreamSource(mediaStream!);
 
-  await ctx.audioWorklet.addModule(chrome.runtime.getURL('audio-processor.js'));
+  await ctx.audioWorklet.addModule(browserApi.runtime.getURL('audio-processor.js'));
   log('audio-processor.js module loaded');
 
   const node = new AudioWorkletNode(ctx, 'vad-processor', {
@@ -210,7 +211,7 @@ async function startRestPipeline(settings: AppSettings): Promise<void> {
 
   setStatus('active');
   log('capture active (rest pipeline)');
-  chrome.runtime.sendMessage({ type: 'STATUS', state: 'active' }).catch(() => {});
+  browserApi.runtime.sendMessage({ type: 'STATUS', state: 'active' }).catch(() => {});
 }
 
 async function captureTabAudio(streamId: string): Promise<MediaStream> {
@@ -228,7 +229,8 @@ async function captureTabAudio(streamId: string): Promise<MediaStream> {
   }
 
   try {
-    log('falling back to chrome.tabCapture.capture()');
+    log('falling back to browser display/audio capture');
+    if (!hasTabCapture) return await captureDisplayAudio();
     return await captureTabStream();
   } catch (error) {
     log(`tabCapture.capture failed: ${String(error)}`, 'error');
@@ -236,10 +238,18 @@ async function captureTabAudio(streamId: string): Promise<MediaStream> {
   }
 }
 
+async function captureDisplayAudio(): Promise<MediaStream> {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    throw new Error('This Firefox version does not provide display audio capture.');
+  }
+  log('requesting Firefox tab audio capture permission');
+  return navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+}
+
 function captureTabStream(): Promise<MediaStream> {
   return new Promise((resolve, reject) => {
-    chrome.tabCapture.capture({ audio: true, video: false }, (stream) => {
-      const lastError = chrome.runtime.lastError;
+    browserApi.tabCapture.capture({ audio: true, video: false }, (stream) => {
+      const lastError = browserApi.runtime.lastError;
       if (lastError) {
         reject(new Error(lastError.message ?? 'tabCapture failed.'));
         return;
@@ -355,7 +365,7 @@ async function handleSegment(data: any, settings: AppSettings): Promise<void> {
     log(`final[${segment.targetLang}] ${segment.translatedText}`);
   }
 
-  await chrome.runtime.sendMessage({ type: 'TRANSLATION_RESULT', result: segment }).catch(() => {});
+  await browserApi.runtime.sendMessage({ type: 'TRANSLATION_RESULT', result: segment }).catch(() => {});
   log(`segment #${segment.id} sent to background (interim=${segment.interim})`);
 }
 
@@ -365,7 +375,7 @@ function reportError(error: unknown): void {
   setStatus(`error: ${detail}`);
   log(`error: ${detail}`, 'error');
   logger.error('Capture error. Full error:', error);
-  chrome.runtime.sendMessage({ type: 'ERROR', message: detail }).catch(() => {});
+  browserApi.runtime.sendMessage({ type: 'ERROR', message: detail }).catch(() => {});
 }
 
 async function stopCapture(): Promise<void> {

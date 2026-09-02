@@ -5,7 +5,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "node scripts/build.mjs chrome",
+    "build:chrome": "node scripts/build.mjs chrome",
+    "build:edge": "node scripts/build.mjs edge",
+    "build:firefox": "node scripts/build.mjs firefox",
+    "build:all": "node scripts/build.mjs all",
     "typecheck": "tsc --noEmit",
     "dev": "vite"
   },

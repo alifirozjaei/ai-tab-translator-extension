@@ -1,0 +1,1 @@
+const a=globalThis.browser??globalThis.chrome;var e;const t=!!((e=a==null?void 0:a.offscreen)!=null&&e.createDocument);var o;const s=!!((o=a==null?void 0:a.tabCapture)!=null&&o.getMediaStreamId);export{t as a,a as b,s as h};

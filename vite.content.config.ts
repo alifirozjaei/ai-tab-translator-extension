@@ -7,7 +7,7 @@ export default defineConfig({
     'process.env.NODE_ENV': JSON.stringify('production'),
   },
   build: {
-    outDir: 'dist',
+    outDir: process.env.BUILD_OUT_DIR ?? 'dist',
     emptyOutDir: false,
     lib: {
       entry: 'src/content/main.tsx',

@@ -1,6 +1,7 @@
 import type { AppSettings, CaptureStatus, RuntimeMessage, TranslationResult } from '../types';
 import { addSegment, getSegments } from '../services/settings';
 import { logger } from '../services/logger';
+import { browserApi, hasOffscreen, hasTabCapture } from '../platform/browser';
 
 let status: CaptureStatus = { state: 'idle', segments: 0 };
 let activeSettings: AppSettings | null = null;
@@ -8,7 +9,7 @@ let offscreenReady = false;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-chrome.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResponse) => {
+browserApi.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResponse) => {
   logger.debug('message:', message.type);
   handleMessage(message)
     .then((result) => sendResponse(result ?? { ok: true }))
@@ -27,7 +28,7 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
       return stopCapture();
     case 'UPDATE_SETTINGS':
       activeSettings = message.settings;
-      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: message.settings }).catch(() => {});
+      await browserApi.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: message.settings }).catch(() => {});
       return { ok: true };
     case 'GET_STATUS':
       status.segments = (await getSegments()).length;
@@ -66,7 +67,7 @@ async function startCapture(settings: AppSettings): Promise<{ ok: boolean; error
     return { ok: false, error: 'Add your Gemini API key in the Settings page first.' };
   }
 
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const [tab] = await browserApi.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) {
     return { ok: false, error: 'No active tab found.' };
   }
@@ -94,7 +95,11 @@ async function startCapture(settings: AppSettings): Promise<{ ok: boolean; error
   }
 
   try {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+    if (browserApi.scripting?.executeScript) {
+      await browserApi.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+    } else {
+      await browserApi.tabs.executeScript(tab.id, { file: 'content.js' });
+    }
   } catch (error) {
     status.state = 'idle';
     activeSettings = null;
@@ -104,13 +109,13 @@ async function startCapture(settings: AppSettings): Promise<{ ok: boolean; error
 
   let streamId: string | undefined;
   try {
-    streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+    if (hasTabCapture) streamId = await browserApi.tabCapture.getMediaStreamId({ targetTabId: tab.id });
   } catch (error) {
     logger.warn('could not acquire tab media stream id, offscreen may retry:', error);
   }
 
   try {
-    await chrome.runtime.sendMessage({ type: 'START_CAPTURE', settings, tabId: tab.id, streamId } satisfies RuntimeMessage);
+    await browserApi.runtime.sendMessage({ type: 'START_CAPTURE', settings, tabId: tab.id, streamId } satisfies RuntimeMessage);
   } catch (error) {
     activeSettings = null;
     status = { state: 'error', tabId: tab.id, segments: (await getSegments()).length, error: String(error) };
@@ -126,7 +131,11 @@ async function startCapture(settings: AppSettings): Promise<{ ok: boolean; error
 }
 
 async function ensureOffscreen(): Promise<void> {
-  const runtime = chrome.runtime as unknown as {
+  if (!hasOffscreen) {
+    // Firefox runs the audio engine alongside this background page.
+    return;
+  }
+  const runtime = browserApi.runtime as unknown as {
     getContexts?: (filter: { contextTypes: string[] }) => Promise<Array<{ contextType: string }>>;
   };
 
@@ -136,8 +145,8 @@ async function ensureOffscreen(): Promise<void> {
   }
 
   offscreenReady = false;
-  await chrome.offscreen.createDocument({
-    url: chrome.runtime.getURL('offscreen/index.html'),
+  await browserApi.offscreen.createDocument({
+    url: browserApi.runtime.getURL('offscreen/index.html'),
     reasons: ['USER_MEDIA', 'AUDIO_PLAYBACK'],
     justification: 'Capture tab audio, detect and translate speech, and play dubbed audio in the browser.',
   });
@@ -157,7 +166,7 @@ async function relaySegment(result: TranslationResult): Promise<void> {
     return;
   }
   try {
-    await chrome.tabs.sendMessage(status.tabId, { type: 'PLAY_TRANSLATION', result, volume: activeSettings?.translatedVolume ?? 1 } satisfies RuntimeMessage);
+    await browserApi.tabs.sendMessage(status.tabId, { type: 'PLAY_TRANSLATION', result, volume: activeSettings?.translatedVolume ?? 1 } satisfies RuntimeMessage);
     logger.debug(`relayed translation #${result.id} (interim=${result.interim}) to tab ${status.tabId}`);
   } catch (error) {
     logger.error(
@@ -172,29 +181,29 @@ async function stopCapture(): Promise<{ ok: boolean }> {
   const wasRunning = status.state === 'active' || status.state === 'starting';
   status = { state: 'idle', segments: (await getSegments()).length };
 
-  await chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' } satisfies RuntimeMessage).catch(() => {});
+  await browserApi.runtime.sendMessage({ type: 'STOP_CAPTURE' } satisfies RuntimeMessage).catch(() => {});
 
   if (wasRunning && tabId) {
-    await chrome.tabs.sendMessage(tabId, { type: 'CLEAR_TRANSLATION' } satisfies RuntimeMessage).catch(() => {});
+    await browserApi.tabs.sendMessage(tabId, { type: 'CLEAR_TRANSLATION' } satisfies RuntimeMessage).catch(() => {});
   }
 
   activeSettings = null;
   return { ok: true };
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+browserApi.tabs.onRemoved.addListener((tabId) => {
   if (status.tabId === tabId) {
     stopCapture().catch(() => {});
   }
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+browserApi.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (status.tabId === tabId && (changeInfo.status === 'loading' || changeInfo.discarded)) {
     stopCapture().catch(() => {});
   }
 });
 
-chrome.tabCapture?.onStatusChanged?.addListener((info) => {
+browserApi.tabCapture?.onStatusChanged?.addListener((info) => {
   if (info.status === 'stopped' && (status.state === 'active' || status.state === 'starting')) {
     stopCapture().catch(() => {});
   }

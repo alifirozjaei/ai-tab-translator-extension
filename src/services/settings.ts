@@ -1,4 +1,5 @@
 import type { AppSettings, TranslationResult } from '../types';
+import { browserApi } from '../platform/browser';
 
 const SETTINGS_KEY = 'settings';
 const SEGMENTS_KEY = 'segments';
@@ -26,7 +27,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 const MAX_SEGMENTS = 500;
 
 export async function getSettings(): Promise<AppSettings> {
-  const stored = await chrome.storage.local.get(SETTINGS_KEY);
+  const stored = await browserApi.storage.local.get(SETTINGS_KEY);
   const saved = (stored[SETTINGS_KEY] ?? {}) as Partial<AppSettings>;
   const merged = {
     ...DEFAULT_SETTINGS,
@@ -57,7 +58,7 @@ export async function saveSettings(patch: Partial<AppSettings>): Promise<AppSett
     ...patch,
     liveTranslateModel: LIVE_TRANSLATE_MODEL,
   };
-  await chrome.storage.local.set({ [SETTINGS_KEY]: next });
+  await browserApi.storage.local.set({ [SETTINGS_KEY]: next });
   return next;
 }
 
@@ -66,16 +67,16 @@ export function hasApiKey(settings: AppSettings): boolean {
 }
 
 export async function getSegments(): Promise<TranslationResult[]> {
-  const stored = await chrome.storage.local.get(SEGMENTS_KEY);
+  const stored = await browserApi.storage.local.get(SEGMENTS_KEY);
   return (stored[SEGMENTS_KEY] ?? []) as TranslationResult[];
 }
 
 export async function addSegment(segment: TranslationResult): Promise<void> {
   const segments = await getSegments();
   segments.push(segment);
-  await chrome.storage.local.set({ [SEGMENTS_KEY]: segments.slice(-MAX_SEGMENTS) });
+  await browserApi.storage.local.set({ [SEGMENTS_KEY]: segments.slice(-MAX_SEGMENTS) });
 }
 
 export async function clearSegments(): Promise<void> {
-  await chrome.storage.local.set({ [SEGMENTS_KEY]: [] });
+  await browserApi.storage.local.set({ [SEGMENTS_KEY]: [] });
 }

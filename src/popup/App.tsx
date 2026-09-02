@@ -3,6 +3,7 @@ import { getSettings, saveSettings } from '../services/settings';
 import { LANGUAGES } from '../services/languages';
 import { logger } from '../services/logger';
 import type { AppSettings, CaptureStatus } from '../types';
+import { browserApi } from '../platform/browser';
 
 const inputClass = 'w-full rounded-md border border-slate-700 bg-slate-900 px-2.5 py-2 text-xs text-slate-100 outline-none focus:border-indigo-500';
 
@@ -14,14 +15,14 @@ export default function App() {
   const [showKey, setShowKey] = useState(false);
   const reload = useCallback(async (syncSettings = false) => {
     if (syncSettings) setSettings(await getSettings());
-    try { const result = await chrome.runtime.sendMessage({ type: 'GET_STATUS' }); if (result) setStatus(result); } catch { /* worker restarting */ }
+    try { const result = await browserApi.runtime.sendMessage({ type: 'GET_STATUS' }); if (result) setStatus(result); } catch { /* worker restarting */ }
   }, []);
   useEffect(() => { reload(true); const timer = setInterval(() => reload(), 1500); return () => clearInterval(timer); }, [reload]);
   const update = (patch: Partial<AppSettings>) => setSettings((s) => {
     if (!s) return s;
     const next = { ...s, ...patch };
     void saveSettings(next);
-    void chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: next }).catch(() => {});
+    void browserApi.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: next }).catch(() => {});
     return next;
   });
   const active = status.state === 'active' || status.state === 'starting';
@@ -29,7 +30,7 @@ export default function App() {
   const toggle = async () => {
     if (!settings) return;
     setBusy(true); setError('');
-    try { const fresh = await saveSettings(settings); const result = await chrome.runtime.sendMessage({ type: active ? 'STOP' : 'START', settings: fresh }); if (!result?.ok) setError(result?.error ?? 'Operation failed.'); }
+    try { const fresh = await saveSettings(settings); const result = await browserApi.runtime.sendMessage({ type: active ? 'STOP' : 'START', settings: fresh }); if (!result?.ok) setError(result?.error ?? 'Operation failed.'); }
     catch (e) { logger.error('capture toggle failed', e); setError(String(e)); }
     finally { setBusy(false); await reload(true); }
   };
