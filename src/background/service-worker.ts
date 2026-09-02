@@ -1,10 +1,4 @@
-import type {
-  AppSettings,
-  CaptureStatus,
-  RuntimeMessage,
-  SubtitleSegment,
-  TranslationMode,
-} from '../types';
+import type { AppSettings, CaptureStatus, RuntimeMessage, TranslationResult } from '../types';
 import { addSegment, getSegments } from '../services/settings';
 import { logger } from '../services/logger';
 
@@ -31,6 +25,10 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
       return startCapture(message.settings);
     case 'STOP':
       return stopCapture();
+    case 'UPDATE_SETTINGS':
+      activeSettings = message.settings;
+      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: message.settings }).catch(() => {});
+      return { ok: true };
     case 'GET_STATUS':
       status.segments = (await getSegments()).length;
       return status;
@@ -40,7 +38,7 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
       return { ok: true };
     case 'STATUS':
       status.state = message.state;
-      if (message.error) status.error = message.error;
+      status.error = message.error;
       return { ok: true };
     case 'ERROR':
       status.state = 'error';
@@ -49,12 +47,14 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
         message: message.message,
         state: status.state,
       });
+      await stopCapture();
+      status = { state: 'error', segments: (await getSegments()).length, error: message.message };
       return { ok: true };
-    case 'SEGMENT':
-      if (!message.segment.interim) {
-        await addSegment(message.segment);
+    case 'TRANSLATION_RESULT':
+      if (!message.result.interim) {
+        await addSegment(message.result);
       }
-      await relaySegment(message.segment, activeSettings?.mode ?? 'both');
+      await relaySegment(message.result);
       return { ok: true };
     default:
       return { ok: false, error: `Unknown message type: ${(message as { type: string }).type}` };
@@ -85,31 +85,21 @@ async function startCapture(settings: AppSettings): Promise<{ ok: boolean; error
   activeSettings = settings;
   status = { state: 'starting', tabId: tab.id, segments: (await getSegments()).length };
 
-  await ensureOffscreen();
+  try {
+    await ensureOffscreen();
+  } catch (error) {
+    status = { state: 'error', tabId: tab.id, segments: (await getSegments()).length, error: String(error) };
+    activeSettings = null;
+    return { ok: false, error: String(error) };
+  }
 
   try {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
-    await chrome.tabs
-      .sendMessage(tab.id, {
-        type: 'OVERLAY_CONFIG',
-        prefs: settings.subtitles,
-        mode: settings.mode,
-      } satisfies RuntimeMessage)
-      .catch(() => {});
   } catch (error) {
     status.state = 'idle';
     activeSettings = null;
-    logger.error('overlay injection failed:', error);
-    return { ok: false, error: `Could not inject the subtitle overlay: ${String(error)}` };
-  }
-
-  const shouldMute = settings.mode !== 'subtitles' && (settings.liveTranslateEnabled || settings.muteOriginal);
-  if (shouldMute) {
-    try {
-      await chrome.tabs.update(tab.id, { muted: true });
-    } catch {
-      logger.warn('could not mute original tab audio (best-effort)');
-    }
+    logger.error('translation audio script injection failed:', error);
+    return { ok: false, error: `Could not prepare translation audio: ${String(error)}` };
   }
 
   let streamId: string | undefined;
@@ -119,12 +109,17 @@ async function startCapture(settings: AppSettings): Promise<{ ok: boolean; error
     logger.warn('could not acquire tab media stream id, offscreen may retry:', error);
   }
 
-  await chrome.runtime.sendMessage({
-    type: 'START_CAPTURE',
-    settings,
-    tabId: tab.id,
-    streamId,
-  } satisfies RuntimeMessage);
+  try {
+    await chrome.runtime.sendMessage({ type: 'START_CAPTURE', settings, tabId: tab.id, streamId } satisfies RuntimeMessage);
+  } catch (error) {
+    activeSettings = null;
+    status = { state: 'error', tabId: tab.id, segments: (await getSegments()).length, error: String(error) };
+    return { ok: false, error: String(error) };
+  }
+  // The offscreen engine is now running asynchronously. Mark the session active
+  // here as well so the popup cannot remain stuck on "Starting…" if the worker
+  // misses the follow-up STATUS message.
+  status = { state: 'active', tabId: tab.id, segments: (await getSegments()).length };
   logger.info('capture started on tab', tab.id, 'mode:', settings.mode);
 
   return { ok: true };
@@ -156,17 +151,17 @@ async function ensureOffscreen(): Promise<void> {
   }
 }
 
-async function relaySegment(segment: SubtitleSegment, mode: TranslationMode): Promise<void> {
+async function relaySegment(result: TranslationResult): Promise<void> {
   if (!status.tabId) {
     logger.warn('relaySegment: no active tab to relay to');
     return;
   }
   try {
-    await chrome.tabs.sendMessage(status.tabId, { type: 'SHOW_SUBTITLE', segment, mode } satisfies RuntimeMessage);
-    logger.debug(`relayed segment #${segment.id} (interim=${segment.interim}) to tab ${status.tabId}`);
+    await chrome.tabs.sendMessage(status.tabId, { type: 'PLAY_TRANSLATION', result, volume: activeSettings?.translatedVolume ?? 1 } satisfies RuntimeMessage);
+    logger.debug(`relayed translation #${result.id} (interim=${result.interim}) to tab ${status.tabId}`);
   } catch (error) {
     logger.error(
-      `relaySegment: could not send to tab ${status.tabId} — content script not injected or tab navigated:`,
+      `relaySegment: could not send translation audio to tab ${status.tabId}:`,
       error,
     );
   }
@@ -180,12 +175,7 @@ async function stopCapture(): Promise<{ ok: boolean }> {
   await chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' } satisfies RuntimeMessage).catch(() => {});
 
   if (wasRunning && tabId) {
-    await chrome.tabs.sendMessage(tabId, { type: 'CLEAR_SUBTITLE' } satisfies RuntimeMessage).catch(() => {});
-    try {
-      await chrome.tabs.update(tabId, { muted: false });
-    } catch {
-      /* best-effort */
-    }
+    await chrome.tabs.sendMessage(tabId, { type: 'CLEAR_TRANSLATION' } satisfies RuntimeMessage).catch(() => {});
   }
 
   activeSettings = null;

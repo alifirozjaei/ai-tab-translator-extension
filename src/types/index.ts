@@ -1,14 +1,5 @@
-export type TranslationMode = 'subtitles' | 'voice' | 'both';
-export type SubtitlePosition = 'top' | 'bottom';
+export type TranslationMode = 'voice';
 export type CaptureState = 'idle' | 'starting' | 'active' | 'error';
-
-export interface SubtitlePrefs {
-  fontSize: number;
-  position: SubtitlePosition;
-  bgOpacity: number;
-  showOriginal: boolean;
-  originalFirst: boolean;
-}
 
 export interface AppSettings {
   geminiApiKey: string;
@@ -18,19 +9,18 @@ export interface AppSettings {
   translationModel: string;
   liveTranslateEnabled: boolean;
   liveTranslateModel: string;
-  liveSubtitles: boolean;
   interimIntervalMs: number;
   silenceThresholdMs: number;
   maxSegmentMs: number;
   muteOriginal: boolean;
   originalVolume: number;
+  translatedVolume: number;
   interimEnabled: boolean;
   sttRateLimitPerMinute: number;
   maxSttRetries: number;
-  subtitles: SubtitlePrefs;
 }
 
-export interface SubtitleSegment {
+export interface TranslationResult {
   id: number;
   interim: boolean;
   sourceText: string;
@@ -51,13 +41,13 @@ export interface CaptureStatus {
 export type RuntimeMessage =
   | { type: 'START'; settings: AppSettings }
   | { type: 'STOP' }
+  | { type: 'UPDATE_SETTINGS'; settings: AppSettings }
   | { type: 'GET_STATUS' }
   | { type: 'OFFSCREEN_READY' }
   | { type: 'START_CAPTURE'; settings: AppSettings; tabId: number; streamId?: string }
   | { type: 'STOP_CAPTURE' }
   | { type: 'STATUS'; state: CaptureState; error?: string }
   | { type: 'ERROR'; message: string }
-  | { type: 'SEGMENT'; segment: SubtitleSegment }
-  | { type: 'OVERLAY_CONFIG'; prefs: SubtitlePrefs; mode: TranslationMode }
-  | { type: 'SHOW_SUBTITLE'; segment: SubtitleSegment; mode: TranslationMode }
-  | { type: 'CLEAR_SUBTITLE' };
+  | { type: 'TRANSLATION_RESULT'; result: TranslationResult }
+  | { type: 'PLAY_TRANSLATION'; result: TranslationResult; volume: number }
+  | { type: 'CLEAR_TRANSLATION' };

@@ -1,4 +1,4 @@
-import type { AppSettings, SubtitleSegment } from '../types';
+import type { AppSettings, TranslationResult } from '../types';
 
 const SETTINGS_KEY = 'settings';
 const SEGMENTS_KEY = 'segments';
@@ -6,27 +6,20 @@ const SEGMENTS_KEY = 'segments';
 export const DEFAULT_SETTINGS: AppSettings = {
   geminiApiKey: '',
   targetLang: 'fa',
-  mode: 'both',
+  mode: 'voice',
   sttModel: 'gemini-3.5-transcribe',
   translationModel: 'gemini-2.5-flash',
   liveTranslateEnabled: true,
   liveTranslateModel: 'gemini-3.5-live-translate-preview',
-  liveSubtitles: false,
   interimIntervalMs: 3500,
   silenceThresholdMs: 700,
   maxSegmentMs: 15000,
   muteOriginal: true,
   originalVolume: 0.2,
+  translatedVolume: 1,
   interimEnabled: false,
   sttRateLimitPerMinute: 3,
   maxSttRetries: 3,
-  subtitles: {
-    fontSize: 28,
-    position: 'bottom',
-    bgOpacity: 0.7,
-    showOriginal: true,
-    originalFirst: false,
-  },
 };
 
 const MAX_SEGMENTS = 500;
@@ -34,11 +27,23 @@ const MAX_SEGMENTS = 500;
 export async function getSettings(): Promise<AppSettings> {
   const stored = await chrome.storage.local.get(SETTINGS_KEY);
   const saved = (stored[SETTINGS_KEY] ?? {}) as Partial<AppSettings>;
-  return {
+  const merged = {
     ...DEFAULT_SETTINGS,
     ...saved,
-    subtitles: { ...DEFAULT_SETTINGS.subtitles, ...(saved.subtitles ?? {}) },
-  };
+    mode: 'voice',
+  } as AppSettings;
+  // Older builds stored volume as a percentage (or an invalid slider value).
+  merged.originalVolume = normalizeVolume(merged.originalVolume, DEFAULT_SETTINGS.originalVolume);
+  merged.translatedVolume = normalizeVolume(merged.translatedVolume, DEFAULT_SETTINGS.translatedVolume);
+  return merged;
+}
+
+function normalizeVolume(value: unknown, fallback: number): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  // Repair legacy percentage values such as 20 or 100.
+  const normalized = numeric > 1 ? numeric / 100 : numeric;
+  return Math.max(0, Math.min(1, normalized));
 }
 
 export async function saveSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
@@ -46,7 +51,6 @@ export async function saveSettings(patch: Partial<AppSettings>): Promise<AppSett
   const next: AppSettings = {
     ...current,
     ...patch,
-    subtitles: { ...current.subtitles, ...(patch.subtitles ?? {}) },
   };
   await chrome.storage.local.set({ [SETTINGS_KEY]: next });
   return next;
@@ -56,12 +60,12 @@ export function hasApiKey(settings: AppSettings): boolean {
   return settings.geminiApiKey.trim().length > 0;
 }
 
-export async function getSegments(): Promise<SubtitleSegment[]> {
+export async function getSegments(): Promise<TranslationResult[]> {
   const stored = await chrome.storage.local.get(SEGMENTS_KEY);
-  return (stored[SEGMENTS_KEY] ?? []) as SubtitleSegment[];
+  return (stored[SEGMENTS_KEY] ?? []) as TranslationResult[];
 }
 
-export async function addSegment(segment: SubtitleSegment): Promise<void> {
+export async function addSegment(segment: TranslationResult): Promise<void> {
   const segments = await getSegments();
   segments.push(segment);
   await chrome.storage.local.set({ [SEGMENTS_KEY]: segments.slice(-MAX_SEGMENTS) });

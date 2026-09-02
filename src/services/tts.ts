@@ -3,6 +3,7 @@ import { getTtsLang } from './languages';
 interface TtsItem {
   text: string;
   lang: string;
+  volume: number;
 }
 
 let voices: SpeechSynthesisVoice[] = [];
@@ -44,9 +45,9 @@ function pickVoice(lang: string): SpeechSynthesisVoice | undefined {
 const queue: TtsItem[] = [];
 let speaking = false;
 
-export function speakTranslated(text: string, langCode: string): void {
+export function speakTranslated(text: string, langCode: string, volume = 1): void {
   if (!hasTtsSupport() || !text.trim()) return;
-  queue.push({ text, lang: getTtsLang(langCode) });
+  queue.push({ text, lang: getTtsLang(langCode), volume: Math.max(0, Math.min(1, volume)) });
   if (queue.length > 2) queue.shift();
   pump();
 }
@@ -67,7 +68,7 @@ function pump(): void {
   if (voice) utterance.voice = voice;
   utterance.rate = 1;
   utterance.pitch = 1;
-  utterance.volume = 1;
+  utterance.volume = item.volume;
   utterance.onend = () => {
     speaking = false;
     pump();

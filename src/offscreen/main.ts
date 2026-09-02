@@ -5,7 +5,7 @@ import { encodeWav, toBase64, int16ToBase64 } from '../audio/wav';
 import { logger, describeError } from '../services/logger';
 import { RateLimiter, withRetry } from '../services/rateLimiter';
 import { LiveTranslateSession } from '../services/liveTranslate';
-import type { AppSettings, SubtitleSegment } from '../types';
+import type { AppSettings, TranslationResult } from '../types';
 
 const statusEl = document.getElementById('status');
 const logEl = document.getElementById('log');
@@ -30,11 +30,8 @@ let segId = 0;
 let pipeline: Promise<void> = Promise.resolve();
 
 let liveSession: LiveTranslateSession | null = null;
-let liveLineSource = '';
-let liveLineTranslation = '';
-let liveLineStart = 0;
-let sessionStartTime = 0;
-let liveSubtitlesEnabled = false;
+let originalGain: GainNode | null = null;
+let translatedGain: GainNode | null = null;
 
 function limiter(model: string, perMinute: number): RateLimiter {
   let lim = rateLimiters.get(model);
@@ -53,6 +50,10 @@ chrome.runtime.onMessage.addListener((message: any) => {
     startCapture(message.settings as AppSettings, streamId).catch((error) => reportError(error));
   } else if (message?.type === 'STOP_CAPTURE') {
     stopCapture();
+  } else if (message?.type === 'UPDATE_SETTINGS') {
+    const settings = message.settings as AppSettings;
+    if (translatedGain) translatedGain.gain.value = settings.translatedVolume;
+    if (originalGain) originalGain.gain.value = settings.muteOriginal ? 0 : settings.originalVolume;
   }
 });
 
@@ -109,13 +110,10 @@ async function startLiveTranslate(settings: AppSettings): Promise<void> {
 
   const dubGain = ctx.createGain();
   const duckGain = ctx.createGain();
-  const shouldDub = settings.mode !== 'subtitles';
-  dubGain.gain.value = shouldDub ? 1 : 0;
-  duckGain.gain.value = shouldDub ? settings.originalVolume : 0;
-  log(
-    `live translate: mode=${settings.mode}, dub output=${shouldDub ? 'on' : 'off'}, ` +
-      `original bg volume=${shouldDub ? settings.originalVolume : 0}`,
-  );
+  translatedGain = dubGain;
+  originalGain = duckGain;
+  dubGain.gain.value = settings.translatedVolume;
+  duckGain.gain.value = settings.muteOriginal ? 0 : settings.originalVolume;
 
   pcmNode.port.onmessage = (e) => {
     if (e.data?.type === 'chunk' && e.data.data instanceof Int16Array) {
@@ -131,12 +129,7 @@ async function startLiveTranslate(settings: AppSettings): Promise<void> {
   await ctx.resume();
   log(`audio context resumed (state=${ctx.state})`);
 
-  sessionStartTime = performance.now() / 1000;
-  liveLineStart = 0;
-  liveLineSource = '';
-  liveLineTranslation = '';
-  liveSubtitlesEnabled = settings.liveSubtitles;
-  log(`live translate: subtitles ${liveSubtitlesEnabled ? 'enabled' : 'disabled (audio only)'}`);
+  log(`audio mix: translated=${Math.round(settings.translatedVolume * 100)}%, original=${settings.muteOriginal ? 'muted' : `${Math.round(settings.originalVolume * 100)}%`}`);
 
   liveSession = new LiveTranslateSession(
     settings.geminiApiKey,
@@ -146,24 +139,15 @@ async function startLiveTranslate(settings: AppSettings): Promise<void> {
       onAudio: (pcm24k) => {
         playbackNode?.port.postMessage({ type: 'audio', data: pcm24k }, [pcm24k.buffer]);
       },
-      onInputTranscript: (text) => {
-        liveLineSource = text;
-        showLiveSubtitle(settings);
-      },
-      onOutputTranscript: (text) => {
-        liveLineTranslation = text;
-        showLiveSubtitle(settings);
-      },
-      onTurnComplete: () => finalizeLiveLine(settings),
+      onTurnComplete: () => {},
       onInterrupted: () => {
-        finalizeLiveLine(settings);
         playbackNode?.port.postMessage({ type: 'clear' });
       },
       onState: (s) => log(`live state: ${s}`),
       onError: (m) => reportError(m),
     },
-    true,
-    settings.liveSubtitles,
+    false,
+    false,
   );
 
   await liveSession.start();
@@ -179,48 +163,6 @@ function sendLiveChunk(i16: Int16Array): void {
   if (!liveSession.sendAudio(int16ToBase64(i16))) {
     log('live: audio chunk not sent (session not ready)', 'error');
   }
-}
-
-function showLiveSubtitle(settings: AppSettings): void {
-  if (!liveSubtitlesEnabled) return;
-  const source = liveLineSource.trim();
-  const translation = liveLineTranslation.trim();
-  if (!source && !translation) return;
-  const now = performance.now() / 1000 - sessionStartTime;
-  const segment: SubtitleSegment = {
-    id: ++segId,
-    interim: true,
-    sourceText: source,
-    translatedText: translation || source,
-    sourceLang: 'auto',
-    targetLang: settings.targetLang,
-    startTime: liveLineStart,
-    endTime: now,
-  };
-  chrome.runtime.sendMessage({ type: 'SEGMENT', segment }).catch(() => {});
-}
-
-function finalizeLiveLine(settings: AppSettings): void {
-  const source = liveLineSource.trim();
-  const translation = liveLineTranslation.trim();
-  const now = performance.now() / 1000 - sessionStartTime;
-  if (liveSubtitlesEnabled && (source || translation)) {
-    const segment: SubtitleSegment = {
-      id: ++segId,
-      interim: false,
-      sourceText: source,
-      translatedText: translation || source,
-      sourceLang: 'auto',
-      targetLang: settings.targetLang,
-      startTime: liveLineStart,
-      endTime: now,
-    };
-    chrome.runtime.sendMessage({ type: 'SEGMENT', segment }).catch(() => {});
-    log(`final[${segment.targetLang}] ${segment.translatedText.slice(0, 120)}`);
-  }
-  liveLineSource = '';
-  liveLineTranslation = '';
-  liveLineStart = now;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,7 +185,7 @@ async function startRestPipeline(settings: AppSettings): Promise<void> {
       silenceThresholdMs: settings.silenceThresholdMs,
       maxSegmentMs: settings.maxSegmentMs,
       interimIntervalMs: settings.interimIntervalMs,
-      passThrough: Boolean(settings.muteOriginal),
+      passThrough: true,
     },
   });
   workletNode = node;
@@ -257,8 +199,12 @@ async function startRestPipeline(settings: AppSettings): Promise<void> {
     }
   };
 
+  const restOriginalGain = ctx.createGain();
+  restOriginalGain.gain.value = settings.muteOriginal ? 0 : settings.originalVolume;
   source.connect(node);
-  node.connect(ctx.destination);
+  node.connect(restOriginalGain);
+  restOriginalGain.connect(ctx.destination);
+  originalGain = restOriginalGain;
   await ctx.resume();
   log(`audio context resumed (state=${ctx.state})`);
 
@@ -394,7 +340,7 @@ async function handleSegment(data: any, settings: AppSettings): Promise<void> {
   }
   log(`translation: ${translation.slice(0, 120)}`);
 
-  const segment: SubtitleSegment = {
+  const segment: TranslationResult = {
     id: ++segId,
     interim: Boolean(interim),
     sourceText: text,
@@ -409,7 +355,7 @@ async function handleSegment(data: any, settings: AppSettings): Promise<void> {
     log(`final[${segment.targetLang}] ${segment.translatedText}`);
   }
 
-  await chrome.runtime.sendMessage({ type: 'SEGMENT', segment }).catch(() => {});
+  await chrome.runtime.sendMessage({ type: 'TRANSLATION_RESULT', result: segment }).catch(() => {});
   log(`segment #${segment.id} sent to background (interim=${segment.interim})`);
 }
 
@@ -448,6 +394,8 @@ async function stopCapture(): Promise<void> {
     /* ignore */
   }
   audioCtx = null;
+  originalGain = null;
+  translatedGain = null;
   workletNode = null;
   playbackNode = null;
   mediaStream?.getTracks().forEach((t) => t.stop());
