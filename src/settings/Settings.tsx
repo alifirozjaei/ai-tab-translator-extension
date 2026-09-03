@@ -3,13 +3,217 @@ import { getSettings, saveSettings } from '../services/settings';
 import { LANGUAGES } from '../services/languages';
 import type { AppSettings } from '../types';
 
-const input = 'w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-indigo-500';
 export default function Settings() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [saved, setSaved] = useState(false);
-  useEffect(() => { getSettings().then(setSettings); }, []);
-  if (!settings) return <div className="p-8 text-sm text-slate-400">Loading…</div>;
+
+  useEffect(() => {
+    getSettings().then(setSettings);
+  }, []);
+
+  if (!settings) {
+    return <div className="settings-loading">Loading...</div>;
+  }
+
   const update = (patch: Partial<AppSettings>) => setSettings({ ...settings, ...patch });
-  const save = async () => { await saveSettings(settings); setSaved(true); setTimeout(() => setSaved(false), 2500); };
-  return <main className="mx-auto max-w-xl space-y-4 px-5 py-7 text-slate-100"><header className="flex items-center justify-between"><div><h1 className="text-lg font-bold">AI Tab Translator</h1><p className="text-xs text-slate-500">Audio translation settings</p></div><button onClick={save} className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold">Save</button></header>{saved && <p className="rounded-md bg-emerald-950 p-2 text-xs text-emerald-300">Settings saved.</p>}<section className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4"><h2 className="text-sm font-semibold">AI provider</h2><label className="block text-xs text-slate-400">Gemini API key<input className={`${input} mt-1`} type="password" value={settings.geminiApiKey} onChange={(e) => update({ geminiApiKey: e.target.value })} /></label><label className="block text-xs text-slate-400">Target language<select className={`${input} mt-1`} value={settings.targetLang} onChange={(e) => update({ targetLang: e.target.value })}>{LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.name}</option>)}</select></label></section><section className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-4"><h2 className="text-sm font-semibold">Audio</h2><label className="block text-xs">Translated voice: {Math.round(settings.translatedVolume * 100)}%<input className="mt-1 w-full accent-indigo-500" type="range" min="0" max="1" step=".05" value={settings.translatedVolume} onChange={(e) => update({ translatedVolume: Number(e.target.value) })} /></label><label className="block text-xs">Original audio: {settings.muteOriginal ? 'muted' : `${Math.round(settings.originalVolume * 100)}%`}<input className="mt-1 w-full accent-indigo-500" type="range" min="0" max="1" step=".05" disabled={settings.muteOriginal} value={settings.originalVolume} onChange={(e) => update({ originalVolume: Number(e.target.value) })} /></label><label className="flex items-center gap-2 text-sm"><input type="checkbox" className="accent-indigo-500" checked={settings.muteOriginal} onChange={(e) => update({ muteOriginal: e.target.checked })} /> Mute original audio</label></section></main>;
+
+  const save = async () => {
+    await saveSettings(settings);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  };
+
+  return (
+    <main className="settings-shell">
+      {/* Header */}
+      <header className="settings-header">
+        <div>
+          <h1 className="settings-title">AI Tab Translator</h1>
+          <p className="settings-subtitle">Audio translation settings</p>
+        </div>
+        <button onClick={save} className="save-btn">
+          Save
+        </button>
+      </header>
+
+      {/* Success Message */}
+      {saved && (
+        <div className="success-banner">
+          Settings saved.
+        </div>
+      )}
+
+      {/* AI Provider Section */}
+      <section className="settings-card">
+        <h2 className="card-heading">AI Provider</h2>
+
+        <label className="field-group">
+          <span className="field-label">Gemini API key</span>
+          <input
+            className="field-input"
+            type="password"
+            value={settings.geminiApiKey}
+            onChange={(e) => update({ geminiApiKey: e.target.value })}
+            placeholder="AIza..."
+          />
+          <a
+            className="field-link"
+            href="https://aistudio.google.com/apikey"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Get your Gemini API key ↗
+          </a>
+        </label>
+
+        <label className="field-group">
+          <span className="field-label">Target language</span>
+          <select
+            className="field-select"
+            value={settings.targetLang}
+            onChange={(e) => update({ targetLang: e.target.value })}
+          >
+            {LANGUAGES.map((l) => (
+              <option key={l.code} value={l.code}>{l.name}</option>
+            ))}
+          </select>
+        </label>
+      </section>
+
+      {/* Audio Section */}
+      <section className="settings-card">
+        <h2 className="card-heading">Audio</h2>
+
+        <div className="volume-group">
+          <div className="volume-header">
+            <span className="field-label">Translated voice</span>
+            <span className="volume-value">{Math.round(settings.translatedVolume * 100)}%</span>
+          </div>
+          <input
+            className="volume-slider"
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={settings.translatedVolume}
+            onChange={(e) => update({ translatedVolume: Number(e.target.value) })}
+          />
+        </div>
+
+        <div className="volume-group">
+          <div className="volume-header">
+            <span className="field-label">Original audio</span>
+            <span className="volume-value">
+              {settings.muteOriginal ? 'Muted' : `${Math.round(settings.originalVolume * 100)}%`}
+            </span>
+          </div>
+          <input
+            className="volume-slider"
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            disabled={settings.muteOriginal}
+            value={settings.originalVolume}
+            onChange={(e) => update({ originalVolume: Number(e.target.value) })}
+          />
+          <label className="mute-toggle">
+            <input
+              type="checkbox"
+              checked={settings.muteOriginal}
+              onChange={(e) => update({ muteOriginal: e.target.checked })}
+            />
+            <span className="toggle-slider"></span>
+            <span className="mute-text">Mute original audio</span>
+          </label>
+        </div>
+      </section>
+
+      {/* Advanced Settings */}
+      <section className="settings-card">
+        <h2 className="card-heading">Advanced</h2>
+
+        <label className="field-group">
+          <span className="field-label">Interim results</span>
+          <label className="mute-toggle">
+            <input
+              type="checkbox"
+              checked={settings.interimEnabled}
+              onChange={(e) => update({ interimEnabled: e.target.checked })}
+            />
+            <span className="toggle-slider"></span>
+            <span className="mute-text">Show partial translations while speaking</span>
+          </label>
+        </label>
+
+        <label className="field-group">
+          <span className="field-label">Interim interval (ms)</span>
+          <input
+            className="field-input"
+            type="number"
+            min="500"
+            max="5000"
+            step="100"
+            value={settings.interimIntervalMs}
+            onChange={(e) => update({ interimIntervalMs: Number(e.target.value) })}
+          />
+        </label>
+
+        <label className="field-group">
+          <span className="field-label">Silence threshold (ms)</span>
+          <input
+            className="field-input"
+            type="number"
+            min="500"
+            max="5000"
+            step="100"
+            value={settings.silenceThresholdMs}
+            onChange={(e) => update({ silenceThresholdMs: Number(e.target.value) })}
+          />
+        </label>
+
+        <label className="field-group">
+          <span className="field-label">Max segment duration (ms)</span>
+          <input
+            className="field-input"
+            type="number"
+            min="5000"
+            max="60000"
+            step="1000"
+            value={settings.maxSegmentMs}
+            onChange={(e) => update({ maxSegmentMs: Number(e.target.value) })}
+          />
+        </label>
+
+        <label className="field-group">
+          <span className="field-label">STT rate limit (per minute)</span>
+          <input
+            className="field-input"
+            type="number"
+            min="1"
+            max="100"
+            value={settings.sttRateLimitPerMinute}
+            onChange={(e) => update({ sttRateLimitPerMinute: Number(e.target.value) })}
+          />
+        </label>
+
+        <label className="field-group">
+          <span className="field-label">Max STT retries</span>
+          <input
+            className="field-input"
+            type="number"
+            min="0"
+            max="10"
+            value={settings.maxSttRetries}
+            onChange={(e) => update({ maxSttRetries: Number(e.target.value) })}
+          />
+        </label>
+      </section>
+
+      {/* Footer */}
+      <footer className="settings-footer">
+        <span className="footer-text">AI Tab Translator v1.0</span>
+      </footer>
+    </main>
+  );
 }

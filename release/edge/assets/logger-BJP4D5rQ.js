@@ -1,1 +1,0 @@
-const r="[AI Tab Translator]";function o(n){if(n instanceof Error)return`${n.name}: ${n.message}`;try{return JSON.stringify(n)}catch{return String(n)}}const s={debug:(...n)=>{},info:(...n)=>console.info(r,...n),warn:(...n)=>console.warn(r,...n),error:(...n)=>console.error(r,...n)};export{o as d,s as l};
