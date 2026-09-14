@@ -175,6 +175,9 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
       }
       await relaySegment(message.result);
       return { ok: true };
+    case 'STREAM_STOPPED':
+      await handleStreamStopped();
+      return { ok: true };
     default:
       return { ok: false, error: `Unknown message type: ${(message as { type: string }).type}` };
   }
@@ -292,40 +295,38 @@ function disarmOffscreenWatchdog(): void {
 
 async function checkOffscreen(): Promise<void> {
   if (status.state !== 'active' && status.state !== 'starting') return;
-  if (!hasOffscreen || rearming) return;
-  rearming = true;
+  if (!hasOffscreen) return;
+  const off = browserApi.offscreen as unknown as { hasDocument?: () => Promise<boolean> };
+  let alive = true;
   try {
-    const off = browserApi.offscreen as unknown as { hasDocument?: () => Promise<boolean> };
-    let alive = true;
+    alive = off.hasDocument ? await off.hasDocument() : true;
+  } catch {
+    alive = false;
+  }
+  if (!alive) {
+    // A thrown hasDocument() is not proof of death: round-trip ping the
+    // document before deciding to destructively rearm (M5).
     try {
-      alive = off.hasDocument ? await off.hasDocument() : true;
+      const pong = await browserApi.runtime.sendMessage({ type: 'PING' } satisfies RuntimeMessage);
+      alive = pong?.ok === true;
     } catch {
       alive = false;
     }
-    if (!alive) {
-      // A thrown hasDocument() is not proof of death: round-trip ping the
-      // document before deciding to destructively rearm (M5).
-      try {
-        const pong = await browserApi.runtime.sendMessage({ type: 'PING' } satisfies RuntimeMessage);
-        alive = pong?.ok === true;
-      } catch {
-        alive = false;
-      }
-    }
-    if (!alive) {
-      logger.warn('offscreen document was terminated; recreating capture');
-      await rearmCapture();
-    }
-  } finally {
-    rearming = false;
+  }
+  if (!alive) {
+    logger.warn('offscreen document was terminated; recreating capture');
+    // rearmCapture owns the in-flight guard.
+    await rearmCapture();
   }
 }
 
 async function rearmCapture(): Promise<void> {
-  const tabId = status.tabId;
-  const settings = activeSettings;
-  if (!tabId || !settings) return;
+  if (rearming) return;
+  rearming = true;
   try {
+    const tabId = status.tabId;
+    const settings = activeSettings;
+    if (!tabId || !settings) return;
     await ensureOffscreen();
     let streamId: string | undefined;
     try {
@@ -334,16 +335,18 @@ async function rearmCapture(): Promise<void> {
       logger.warn('could not re-acquire tab stream id:', error);
     }
     await browserApi.runtime.sendMessage({ type: 'START_CAPTURE', settings, tabId, streamId } satisfies RuntimeMessage);
-    logger.info('capture restarted after offscreen termination');
+    logger.info('capture restarted after stream/offscreen loss');
     void persistSession();
   } catch (error) {
-    logger.error('could not restart capture after offscreen termination:', error);
-      sessionVersion++;
+    logger.error('could not restart capture:', error);
+    sessionVersion++;
     status = { state: 'error', segments: (await getSegments()).length, error: String(error) };
     activeSettings = null;
     disarmKeepAlive();
     disarmOffscreenWatchdog();
     void persistSession();
+  } finally {
+    rearming = false;
   }
 }
 
@@ -450,6 +453,24 @@ browserApi.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 browserApi.tabCapture?.onStatusChanged?.addListener((info) => {
   if (info.status === 'stopped' && (status.state === 'active' || status.state === 'starting')) {
-    stopCapture().catch(() => {});
+    void handleStreamStopped();
   }
 });
+
+// The captured tab's stream ended (e.g. Chrome released it when the user
+// switched tabs). The tab is usually still open, so re-capture it instead of
+// permanently stopping; only stop when the tab is really gone.
+async function handleStreamStopped(): Promise<void> {
+  const tabId = status.tabId;
+  if (tabId) {
+    try {
+      await browserApi.tabs.get(tabId);
+      logger.warn('tab capture stopped; re-capturing same tab');
+      await rearmCapture();
+      return;
+    } catch {
+      logger.warn('tab capture stopped and tab is gone; stopping');
+    }
+  }
+  await stopCapture();
+}

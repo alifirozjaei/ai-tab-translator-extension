@@ -48,6 +48,7 @@ export type RuntimeMessage =
   | { type: 'UPDATE_SETTINGS'; settings: AppSettings }
   | { type: 'GET_STATUS' }
   | { type: 'PING' }
+  | { type: 'STREAM_STOPPED' }
   | { type: 'OFFSCREEN_READY' }
   | { type: 'START_CAPTURE'; settings: AppSettings; tabId: number; streamId?: string }
   | { type: 'STOP_CAPTURE' }

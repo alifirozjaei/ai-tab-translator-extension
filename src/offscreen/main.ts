@@ -25,6 +25,9 @@ function log(line: string, level: 'info' | 'error' = 'info'): void {
 let audioCtx: AudioContext | null = null;
 let workletNode: AudioWorkletNode | null = null;
 let playbackNode: AudioWorkletNode | null = null;
+// Source node whose port handler must be detached on teardown, otherwise it
+// keeps logging "chunk not sent" against a nulled session after stop.
+let captureNode: AudioWorkletNode | null = null;
 let mediaStream: MediaStream | null = null;
 let running = false;
 let segId = 0;
@@ -133,9 +136,12 @@ function runLifecycle(fn: () => Promise<void>): Promise<void> {
 }
 
 browserApi.tabCapture?.onStatusChanged?.addListener((info) => {
-  if (info.status === 'stopped' && running) {
-    runLifecycle(stopCapture);
-    sendStatus('idle');
+  if (info.status === 'stopped' && running && !stopRequested) {
+    // The captured tab's stream ended (often because the user switched tabs).
+    // Do NOT treat this as a permanent stop: ask the SW to re-capture the same
+    // tab (it is usually still open and alive).
+    log('tab capture stream ended; asking background to re-capture');
+    browserApi.runtime.sendMessage({ type: 'STREAM_STOPPED' }).catch(() => {});
   }
 });
 
@@ -188,6 +194,7 @@ async function startLiveTranslate(settings: AppSettings): Promise<void> {
     numberOfOutputs: 0,
     processorOptions: { lowQuality: settings.lowQualityAudio === true },
   });
+  captureNode = pcmNode;
   playbackNode = new AudioWorkletNode(ctx, 'playback', {
     numberOfInputs: 0,
     numberOfOutputs: 1,
@@ -397,6 +404,7 @@ async function startRestPipeline(settings: AppSettings): Promise<void> {
     },
   });
   workletNode = node;
+  captureNode = node;
   node.port.onmessage = (e) => {
     if (e.data?.type === 'segment') {
       log(
@@ -637,6 +645,12 @@ function teardownGraph(): void {
     /* ignore */
   }
   liveSession = null;
+  // Detach source-node handlers so a stopped session cannot keep logging
+  // "chunk not sent" forever.
+  if (captureNode) {
+    captureNode.port.onmessage = null;
+    captureNode = null;
+  }
   try {
     workletNode?.port.postMessage({ type: 'reset' });
   } catch {
