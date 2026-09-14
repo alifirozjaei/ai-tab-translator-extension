@@ -239,6 +239,30 @@ export default function App() {
               </label>
             </div>
           </div>
+
+          {/* Low-bandwidth upstream */}
+          <div className="volume-group">
+            <div className="volume-header">
+              <span className="field-label">Low bandwidth (8 kHz)</span>
+              <span className="volume-value">{settings.lowQualityAudio ? 'On' : 'Off'}</span>
+            </div>
+            <div className="original-audio-row">
+              <p className="delay-hint">
+                Halves the audio sent to the API for weak networks. Translation quality drops; applies on next
+                Start.
+              </p>
+              <label className="mute-toggle">
+                <input
+                  type="checkbox"
+                  aria-label="Low bandwidth audio"
+                  checked={settings.lowQualityAudio}
+                  onChange={(e) => update({ lowQualityAudio: e.target.checked })}
+                />
+                <span className="toggle-slider"></span>
+                <span className="mute-text">{settings.lowQualityAudio ? 'On' : 'Off'}</span>
+              </label>
+            </div>
+          </div>
         </section>
 
         {/* Status Bar */}

@@ -17,6 +17,8 @@ export interface AppSettings {
   translatedVolume: number;
   /** ms to wait after the original audio before playing the dub (0 = off). */
   playbackDelayMs: number;
+  /** Send 8kHz audio upstream instead of 16kHz to halve bandwidth on weak networks. */
+  lowQualityAudio: boolean;
   interimEnabled: boolean;
   sttRateLimitPerMinute: number;
   maxSttRetries: number;

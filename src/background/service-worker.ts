@@ -19,6 +19,15 @@ const sessionStorage = (browserApi.storage as unknown as {
   session?: { get: (keys: string[]) => Promise<Record<string, unknown>>; set: (items: Record<string, unknown>) => Promise<void> };
 }).session;
 
+// Bumped on every in-memory status transition; restoreSession only applies a
+// persisted snapshot if no transition happened while it was reading, so it can
+// never clobber a fresher in-memory state (N4).
+let sessionVersion = 0;
+// Watchdog for the transient 'starting' state: if the offscreen never reports
+// 'active' (e.g. it died mid-handshake and no STATUS ever arrived), fail
+// loudly instead of leaving the UI on "Starting..." forever (N12).
+let startingTimer: number | null = null;
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Rehydrate on every wake: top-level module scope runs whenever the worker
@@ -32,11 +41,38 @@ browserApi.runtime.onInstalled?.addListener(() => {
   void restoreSession();
 });
 
+function disarmStartingTimer(): void {
+  if (startingTimer) {
+    clearTimeout(startingTimer);
+    startingTimer = null;
+  }
+}
+
+function armStartingTimer(): void {
+  disarmStartingTimer();
+  startingTimer = setTimeout(() => {
+    startingTimer = null;
+    if (status.state === 'starting') {
+      logger.error('capture stuck in starting state; aborting');
+      void stopCapture().finally(() => {
+        status = { state: 'error', segments: 0, error: 'Capture did not start in time.' };
+        sessionVersion++;
+        void persistSession();
+      });
+    }
+  }, 15000) as unknown as number;
+}
+
 async function persistSession(): Promise<void> {
   if (!sessionStorage) return;
   try {
     await sessionStorage.set({
-      [SESSION_KEY]: { state: status.state, tabId: status.tabId ?? null, settings: activeSettings },
+      [SESSION_KEY]: {
+        state: status.state,
+        tabId: status.tabId ?? null,
+        settings: activeSettings,
+        version: sessionVersion,
+      },
     });
   } catch (error) {
     logger.warn('could not persist session state:', error);
@@ -45,19 +81,27 @@ async function persistSession(): Promise<void> {
 
 async function restoreSession(): Promise<void> {
   if (!sessionStorage) return;
+  const versionAtStart = sessionVersion;
   try {
     const stored = await sessionStorage.get([SESSION_KEY]);
+    // A handler mutated state while we were reading; in-memory is fresher.
+    if (sessionVersion !== versionAtStart) return;
     const s = stored?.[SESSION_KEY] as
-      | { state?: string; tabId?: number | null; settings?: AppSettings | null }
+      | { state?: string; tabId?: number | null; settings?: AppSettings | null; version?: number }
       | undefined;
     if (!s || !s.state) return;
     status.state = (s.state as CaptureStatus['state']) ?? 'idle';
     if (typeof s.tabId === 'number') status.tabId = s.tabId;
     activeSettings = s.settings ?? null;
+    sessionVersion = Math.max(sessionVersion, s.version ?? 0);
     if (status.state === 'active' || status.state === 'starting') {
       armKeepAlive();
       armOffscreenWatchdog();
+      if (status.state === 'starting') armStartingTimer();
+      else disarmStartingTimer();
       logger.info('session restored from storage.session:', status.state);
+    } else {
+      disarmStartingTimer();
     }
   } catch (error) {
     logger.warn('could not restore session state:', error);
@@ -93,9 +137,12 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
       logger.info('offscreen document ready');
       return { ok: true };
     case 'STATUS':
+      sessionVersion++;
       status.state = message.state;
       status.error = message.error;
       if (typeof message.tabId === 'number') status.tabId = message.tabId;
+      if (message.state === 'starting') armStartingTimer();
+      else disarmStartingTimer();
       if (message.state === 'idle' || message.state === 'error') {
         // Every path that reports idle/error must disarm the timers; otherwise
         // both intervals would keep the worker alive (and poll) forever.
@@ -110,6 +157,7 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
       void persistSession();
       return { ok: true };
     case 'ERROR':
+      sessionVersion++;
       status.state = 'error';
       status.error = message.message;
       logger.error('Capture error reported by offscreen engine. Debug info:', {
@@ -117,6 +165,7 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
         state: status.state,
       });
       await stopCapture();
+      sessionVersion++;
       status = { state: 'error', segments: (await getSegments()).length, error: message.message };
       void persistSession();
       return { ok: true };
@@ -154,10 +203,12 @@ async function startCapture(settings: AppSettings): Promise<{ ok: boolean; error
 
   activeSettings = settings;
   status = { state: 'starting', tabId: tab.id, segments: (await getSegments()).length };
+  armStartingTimer();
 
   try {
     await ensureOffscreen();
   } catch (error) {
+      sessionVersion++;
     status = { state: 'error', tabId: tab.id, segments: (await getSegments()).length, error: String(error) };
     activeSettings = null;
     return { ok: false, error: String(error) };
@@ -187,6 +238,7 @@ async function startCapture(settings: AppSettings): Promise<{ ok: boolean; error
     await browserApi.runtime.sendMessage({ type: 'START_CAPTURE', settings, tabId: tab.id, streamId } satisfies RuntimeMessage);
   } catch (error) {
     activeSettings = null;
+      sessionVersion++;
     status = { state: 'error', tabId: tab.id, segments: (await getSegments()).length, error: String(error) };
     return { ok: false, error: String(error) };
   }
@@ -194,6 +246,7 @@ async function startCapture(settings: AppSettings): Promise<{ ok: boolean; error
   // here as well so the popup cannot remain stuck on "Starting…" if the worker
   // misses the follow-up STATUS message.
   status = { state: 'active', tabId: tab.id, segments: (await getSegments()).length };
+  sessionVersion++;
   logger.info('capture started on tab', tab.id, 'mode:', settings.mode);
   armKeepAlive();
   armOffscreenWatchdog();
@@ -284,6 +337,7 @@ async function rearmCapture(): Promise<void> {
     void persistSession();
   } catch (error) {
     logger.error('could not restart capture after offscreen termination:', error);
+      sessionVersion++;
     status = { state: 'error', segments: (await getSegments()).length, error: String(error) };
     activeSettings = null;
     disarmKeepAlive();
@@ -363,6 +417,11 @@ async function stopCapture(): Promise<{ ok: boolean }> {
   const wasRunning = status.state === 'active' || status.state === 'starting';
   disarmKeepAlive();
   disarmOffscreenWatchdog();
+  disarmStartingTimer();
+  // Null activeSettings BEFORE persisting so storage.session never keeps a
+  // stale settings object for an idle session (N5).
+  activeSettings = null;
+  sessionVersion++;
   status = { state: 'idle', segments: (await getSegments()).length };
   void persistSession();
 

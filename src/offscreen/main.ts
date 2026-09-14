@@ -72,7 +72,7 @@ function isTransientError(error: unknown): boolean {
   return (
     /(^|[^0-9])http 5\d\d([^0-9]|$)/.test(m) ||
     /(^|[^0-9])http 429([^0-9]|$)/.test(m) ||
-    /rate limit|retry in|resource_exhausted|network|failed to fetch|socket|websocket|timeout|timed out|abort|unavailable|overloaded|econn|eai_again/i.test(m)
+    /rate limit|retry in|resource_exhausted|network|failed to fetch|socket|websocket|timeout|timed out|abort|unavailable|overloaded|econn|eai_again|closed during setup/i.test(m)
   );
 }
 
@@ -106,7 +106,14 @@ browserApi.runtime.onMessage.addListener((message: any, _sender, sendResponse) =
     const streamId = (message.streamId as string | undefined) ?? '';
     captureTabId = (message.tabId as number | undefined) ?? null;
     stopRequested = false;
-    runLifecycle(() => startCapture(message.settings as AppSettings, streamId).catch((error) => reportError(error)));
+    runLifecycle(() =>
+      startCapture(message.settings as AppSettings, streamId).catch((error) => {
+        // An intentional cancel (Stop during Start) is not an error: it must
+        // not surface an error banner or flip the SW to 'error'.
+        if (stopRequested || !running) return;
+        reportError(error);
+      }),
+    );
   } else if (message?.type === 'STOP_CAPTURE') {
     stopRequested = true;
     runLifecycle(stopCapture);
@@ -179,6 +186,7 @@ async function startLiveTranslate(settings: AppSettings): Promise<void> {
   const pcmNode = new AudioWorkletNode(ctx, 'pcm-stream', {
     numberOfInputs: 1,
     numberOfOutputs: 0,
+    processorOptions: { lowQuality: settings.lowQualityAudio === true },
   });
   playbackNode = new AudioWorkletNode(ctx, 'playback', {
     numberOfInputs: 0,
@@ -196,7 +204,7 @@ async function startLiveTranslate(settings: AppSettings): Promise<void> {
 
   pcmNode.port.onmessage = (e) => {
     if (e.data?.type === 'chunk' && e.data.data instanceof Int16Array) {
-      sendLiveChunk(e.data.data);
+      sendLiveChunk(e.data.data, e.data.rate ?? 16000);
     }
   };
 
@@ -280,13 +288,22 @@ function buildLiveSession(settings: AppSettings, generation: number): LiveTransl
 }
 
 // Chrome suspends AudioContexts in backgrounded documents and can drop the
-// live WebSocket. This watchdog revives both while the session is running.
+// live WebSocket. This watchdog revives both while the session is running and
+// also acts as a heartbeat: periodic STATUS keeps the MV3 service worker (and
+// its keep-alive/offscreen watchdogs) alive after a restart that restored the
+// session.
+let lastHeartbeatAt = 0;
 function armWatchdog(): void {
   if (watchdogTimer) clearInterval(watchdogTimer);
+  lastHeartbeatAt = Date.now();
   watchdogTimer = setInterval(() => {
     if (!running || stopRequested) return;
     if (audioCtx && audioCtx.state === 'suspended') {
       audioCtx.resume().catch(() => {});
+    }
+    if (Date.now() - lastHeartbeatAt > 10000) {
+      lastHeartbeatAt = Date.now();
+      sendStatus('active');
     }
     // Reconnect both when the socket died AND when there is no session at all
     // (e.g. a previous reconnect attempt failed); otherwise a single network
@@ -339,7 +356,7 @@ async function restartLiveSession(): Promise<void> {
   }
 }
 
-function sendLiveChunk(i16: Int16Array): void {
+function sendLiveChunk(i16: Int16Array, rate = 16000): void {
   const throttledLog = (line: string) => {
     const now = Date.now();
     if (now - lastSendErrLog > 1000) {
@@ -351,7 +368,7 @@ function sendLiveChunk(i16: Int16Array): void {
     throttledLog('live: audio chunk not sent (session not ready)');
     return;
   }
-  if (!liveSession.sendAudio(int16ToBase64(i16))) {
+  if (!liveSession.sendAudio(int16ToBase64(i16), rate)) {
     throttledLog('live: audio chunk not sent');
   }
 }
@@ -464,6 +481,10 @@ function enqueueSegment(data: any, settings: AppSettings): void {
     return;
   }
   queuedSegments++;
+  // Strictly serial: the next segment starts only after the previous one
+  // settles, so dubbing order matches speech order (N7). `.finally` sits on the
+  // chain link so each in-flight task decrements exactly once even if teardown
+  // swaps `pipeline` (N3).
   pipeline = pipeline
     .then(() =>
       handleSegment(data, settings).catch((error) => {
@@ -636,5 +657,7 @@ function teardownGraph(): void {
   lastLiveErrorAt = 0;
   lastSendErrLog = 0;
   pipeline = Promise.resolve();
-  queuedSegments = 0;
+  // NOTE: queuedSegments is NOT reset here — in-flight tasks decrement it via
+  // their own .finally, so resetting would push the next session's counter
+  // negative (N3). It drains to 0 naturally as tasks settle.
 }

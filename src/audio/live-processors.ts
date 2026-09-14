@@ -5,15 +5,29 @@ const LIVE_OUTPUT_RATE = 24000;
 
 class PcmStreamProcessor extends AudioWorkletProcessor {
   private readonly factor: number;
+  private readonly lowQuality: boolean;
+  private readonly rate: number;
+  private readonly cap: number;
   private frac = 0;
   private accSum = 0;
   private accCount = 0;
-  private buf: Int16Array = new Int16Array(LIVE_CHUNK);
+  private buf: Int16Array;
   private len = 0;
+  // Pair accumulator for the 16kHz -> 8kHz downsampling (anti-alias: the mean
+  // of each pair instead of dropping every other sample, which would alias the
+  // 4-8kHz band down into 0-4kHz).
+  private pairFirst: number | null = null;
 
   constructor(options?: AudioWorkletNodeOptions) {
     super();
+    const opts = (options?.processorOptions ?? {}) as Record<string, unknown>;
+    // Low-bandwidth mode halves the uplink: 16kHz -> 8kHz and label the stream
+    // accordingly. Chunk boundaries stay at ~100ms either way.
+    this.lowQuality = opts.lowQuality === true;
+    this.rate = this.lowQuality ? 8000 : LIVE_TARGET_RATE;
     this.factor = sampleRate / LIVE_TARGET_RATE;
+    this.cap = this.lowQuality ? 800 : LIVE_CHUNK;
+    this.buf = new Int16Array(this.cap);
   }
 
   process(inputs: Float32Array[][]): boolean {
@@ -28,16 +42,30 @@ class PcmStreamProcessor extends AudioWorkletProcessor {
         const s = this.accSum / this.accCount;
         this.accSum = 0;
         this.accCount = 0;
-        const clamped = Math.max(-1, Math.min(1, s));
-        this.buf[this.len++] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
-        if (this.len >= LIVE_CHUNK) {
-          const chunk = this.buf.slice(0, this.len);
-          this.port.postMessage({ type: 'chunk', data: chunk }, [chunk.buffer]);
-          this.len = 0;
+        if (this.lowQuality) {
+          if (this.pairFirst === null) {
+            this.pairFirst = s;
+          } else {
+            const avg = (this.pairFirst + s) / 2;
+            this.pairFirst = null;
+            this.pushSample(avg);
+          }
+        } else {
+          this.pushSample(s);
         }
       }
     }
     return true;
+  }
+
+  private pushSample(s: number): void {
+    const clamped = Math.max(-1, Math.min(1, s));
+    this.buf[this.len++] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    if (this.len >= this.cap) {
+      const chunk = this.buf.slice(0, this.len);
+      this.port.postMessage({ type: 'chunk', data: chunk, rate: this.rate }, [chunk.buffer]);
+      this.len = 0;
+    }
   }
 }
 
@@ -50,11 +78,14 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   private pr = 0;
   private pc = 0;
   private delaySec = 0;
-  // On interruption the buffer fades out over ~160ms instead of being hard-
-  // flushed, so already-paid dub is not lost and there is no click.
+  // On interruption the buffer fades out over ~160ms, then the remainder is
+  // discarded so already-cancelled dub never plays at full volume.
   private fading = false;
   private fadeRemain = 0;
   private fadeTotal = 0;
+  // true when the fade must end with a full discard (interrupt stop); false
+  // for the short fade-in of a new turn (keep the new audio).
+  private pruneOnFadeEnd = false;
 
   constructor(options?: AudioWorkletNodeOptions) {
     super();
@@ -73,10 +104,11 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   private handle(data: any): void {
     if (!data) return;
     if (data.type === 'clear') {
-      // Fade out the pending buffer instead of dropping it.
+      // Interrupt: fade the currently playing dub, then discard what remains.
       this.fading = true;
       this.fadeTotal = Math.round(this.targetRate * 0.16);
       this.fadeRemain = this.fadeTotal;
+      this.pruneOnFadeEnd = true;
       return;
     }
     if (data.type === 'delay' && typeof data.ms === 'number') {
@@ -89,7 +121,17 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   }
 
   private appendInt16(i16: Int16Array): void {
-    this.fading = false;
+    if (this.fading && this.pruneOnFadeEnd) {
+      // A new turn arrived while the interrupt-fade was running: the old
+      // (cancelled) dub is dropped and the new audio fades in over ~1.3ms so
+      // there is no hard click (N11), and the new audio is NOT pruned.
+      this.pr = this.pw;
+      this.pc = 0;
+      this.fading = true;
+      this.fadeTotal = Math.round(this.targetRate * 0.01);
+      this.fadeRemain = this.fadeTotal;
+      this.pruneOnFadeEnd = false;
+    }
     const ratio = LIVE_OUTPUT_RATE / this.targetRate;
     const n = i16.length;
     if (n === 0) return;
@@ -122,7 +164,20 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         if (this.fading) {
           sample *= this.fadeTotal > 0 ? this.fadeRemain / this.fadeTotal : 0;
           this.fadeRemain--;
-          if (this.fadeRemain <= 0) this.fading = false;
+          if (this.fadeRemain <= 0) {
+            this.fading = false;
+            if (this.pruneOnFadeEnd) {
+              // Interrupt fade done: discard the rest of the cancelled buffer.
+              // Emit this faded sample and `continue` WITHOUT advancing the
+              // pointers again, so pc lands on exactly 0 (N8).
+              this.pruneOnFadeEnd = false;
+              this.pr = this.pw;
+              this.pc = 0;
+              out[i] = sample;
+              continue;
+            }
+            // New-turn fade-in finished: keep the (new) buffer as-is.
+          }
         }
         out[i] = sample;
         this.pr = (this.pr + 1) % this.pending.length;

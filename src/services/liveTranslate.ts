@@ -157,7 +157,7 @@ export class LiveTranslateSession {
     });
   }
 
-  sendAudio(dataBase64: string): boolean {
+  sendAudio(dataBase64: string, rate = 16000): boolean {
     if (this.dead || !this.isReady) return false;
     // Backpressure: if the uplink is stalled, drop rather than grow the buffer.
     try {
@@ -165,7 +165,7 @@ export class LiveTranslateSession {
       this.ws!.send(
         JSON.stringify({
           realtimeInput: {
-            mediaChunks: [{ data: dataBase64, mimeType: 'audio/pcm;rate=16000' }],
+            mediaChunks: [{ data: dataBase64, mimeType: `audio/pcm;rate=${rate}` }],
           },
         }),
       );

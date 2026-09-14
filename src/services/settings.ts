@@ -20,6 +20,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   originalVolume: 0.2,
   translatedVolume: 1,
   playbackDelayMs: 5000,
+  lowQualityAudio: false,
   interimEnabled: false,
   sttRateLimitPerMinute: 3,
   maxSttRetries: 3,
