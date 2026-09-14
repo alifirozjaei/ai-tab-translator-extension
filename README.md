@@ -1,81 +1,78 @@
 # LiveDub — AI Audio Translator
 
-A browser extension that provides real-time AI voice translation for audio/video
-playing in a tab.
+A Chrome extension that provides **real-time AI voice translation (dubbing)** for
+audio/video playing in a tab. The original speech is dubbed into your chosen
+language, with a configurable playback delay so the translated voice trails the
+original by the amount you set.
 
 It runs **entirely in your browser**. There is no backend, no accounts, no
-tracking, and no cloud storage. All AI requests are sent directly from your
-browser to the AI provider using **your own API key**.
+tracking, and no cloud storage. All AI requests go directly from your browser
+to Google Gemini using **your own API key**.
 
-> ⚠️ **Personal use only.** This is not a commercial product. No payments,
-> subscriptions, usage limits, analytics, accounts, or SaaS features are
-> included or planned.
+> ⚠️ **Personal use only.** No payments, subscriptions, analytics, accounts, or
+> SaaS features are included or planned.
 
 ---
 
-## Features (MVP)
+## Features
 
-- **Tab audio capture** — captures the audio of the active tab via
-  `chrome.tabCapture` + `AudioWorklet` (no microphone permission).
-- **Speech recognition** — streaming speech-to-text with automatic language
-  detection (via Google Gemini inline audio).
-- **Translation** — translate each recognized sentence into your chosen target
-  language (Gemini).
-- **Voice dubbing** — reads the translated text aloud using the browser's
-  built-in `speechSynthesis` engine.
-- **Audio controls** — independently adjust translated/original audio and mute
-  the original track.
-- **Settings** — manage your API key and target language, stored locally.
+- **Live voice dubbing** — tab audio is streamed to the Gemini **Live API**
+  (`gemini-3.5-live-translate-preview`) over WebSocket; the dubbed voice is
+  played as it is generated. No intermediate text needed for the voice track.
+- **Configurable playback delay** — 0–10 s slider (default 5 s). The dubbed
+  voice starts this long after the original audio, for scripted/overdub-style
+  listening.
+- **Low-bandwidth mode (8 kHz)** — halves the upstream audio sent to the API
+  for weak/slow networks (translation quality drops slightly).
+- **Keeps translating the source tab** — switching to another tab no longer
+  stops the dub; the captured tab keeps translating until you press Stop.
+- **Audio controls** — separate translated/original volume and mute-original
+  toggle.
+- **Subtitles mode (legacy)** — the fallback REST pipeline (VAD → STT →
+  translation → `speechSynthesis`) is still available for profiles that stored
+  `liveTranslateEnabled: false`.
+- **Settings** — API key, target language, models, and advanced tuning, stored
+  locally.
 
 ---
 
 ## Architecture
 
 ```
-Browser Tab Audio
-     │
-     ▼
-Audio Capture Layer      (browser adapter → AudioWorklet VAD/segmentation)
-     │
-     ▼
-Speech Recognition API  (Google Gemini inline audio → transcript)
-     │
-     ▼
-Translation API         (Google Gemini text → target language)
-     │
-     ▼
-Text-To-Speech          (browser speechSynthesis in the content script)
-     │
-     ▼
-Audio Playback + Subtitle Overlay (React overlay injected into the page)
+Browser tab audio
+      │
+      ▼
+Offscreen document (audio engine)
+      │  chrome.tabCapture → AudioWorklet (16 kHz PCM, 100 ms chunks)
+      ▼
+Gemini Live API (WebSocket)  ──►  dubbed voice (24 kHz PCM)
+      │                              │
+      │                              ▼
+      │                    Playback worklet (delay line + ring buffer)
+      │                              │
+      │                              ▼
+      │                      Speakers (original audio mix)
+      ▼
+transcriptions (optional) → stored locally
 ```
+
+- **Service worker** (`src/background/service-worker.ts`) — MV3 orchestrator:
+  start/stop, session state persisted to `storage.session`, keep-alive, and a
+  watchdog that recreates the offscreen document if Chrome terminates it.
+- **Offscreen audio engine** (`src/offscreen/main.ts`) — capture, WebSocket
+  session, reconnect with exponential backoff, and a watchdog that resumes a
+  suspended `AudioContext` and re-establishes the live session on network
+  blips.
+- **Audio worklets** (`src/audio/live-processors.ts`) — `pcm-stream` (capture +
+  optional 8 kHz downsampling) and `playback` (delay line + ring buffer with a
+  160 ms fade on interruption).
 
 ### Browser targets
 
-The application code is shared. Browser-specific behavior is isolated in
-`src/platform/browser.ts`, the browser manifests, and the capture branch:
-
-- Chrome and Edge use Manifest V3, `tabCapture`, and `offscreen`.
-- Firefox uses a persistent Manifest V2 background page and its audio/display
-  capture fallback because Firefox does not support Chrome's MV3 service-worker
-  and offscreen combination.
-
-Firefox may show a browser capture picker when starting a session. This is a
-browser platform limitation of tab-audio capture, not a separate translation
-pipeline.
-
-### Extension parts
-
-| Part | Path | Role |
-|------|------|------|
-| Background | `src/background/service-worker.ts` | Orchestrates start/stop, capture lifecycle, relay. |
-| Offscreen audio engine | `src/offscreen/main.ts` | Captures tab audio, runs VAD, calls STT + translation. |
-| AudioWorklet | `src/audio/processor.ts` | 16 kHz downmix + voice-activity/silence segmentation. |
-| Content script | `src/content/main.tsx` + `subtitle-overlay.tsx` | Injects the subtitle overlay and plays dubbed speech. |
-| Popup | `src/popup/App.tsx` | Start/stop, language, mode, export controls. |
-| Settings | `src/settings/Settings.tsx` | API key + preferences. |
-| Services | `src/services/*` | Gemini client, STT, translation, TTS, SRT/VTT export. |
-| Storage | `src/services/settings.ts` | `chrome.storage.local` read/write. |
+- **Chrome / Edge (Manifest V3)** — supported; requires Chrome 116+.
+- **Firefox** — a `manifest.firefox.json` exists but the current build is
+  **not functional** (the MV3 ESM bundle is not loadable as an MV2 background
+  script). Treat Firefox as unsupported until that path is reworked.
 
 ---
 
@@ -84,127 +81,135 @@ pipeline.
 ### Prerequisites
 
 - Node.js 18+ and npm.
-- Google Chrome 116+ (for `chrome.offscreen` and MV3).
+- Google Chrome 116+.
 
 ### 1. Install dependencies
 
 ```bash
-cd ai-tab-translator-extension
 npm install
 ```
 
-### 2. Build packages
+### 2. Build
 
 ```bash
-npm run build:all
+npm run build:chrome
 ```
 
-Output goes to `release/` with one unpacked directory and one zip per browser:
+Output goes to `release/chrome/` plus `release/livedub-chrome-v0.1.0.zip`.
 
-- `npm run build:chrome` — `release/chrome/` and `livedub-chrome-v*.zip`
-- `npm run build:edge` — `release/edge/` and `livedub-edge-v*.zip`
-- `npm run build:firefox` — `release/firefox/` and `livedub-firefox-v*.zip`
-- `npm run build:all` — all three packages
+Other targets: `npm run build:edge`, `npm run build:firefox`, `npm run build:all`.
 
 ### 3. Load the extension in Chrome
 
-1. Open the extensions manager for your browser.
+1. Open `chrome://extensions`.
 2. Enable **Developer mode** (top-right toggle).
-3. Click **Load unpacked**.
-4. Select the `dist/` folder.
-5. Pin the **LiveDub** icon from the extensions menu.
+3. Click **Load unpacked** and select the **`release/chrome`** folder.
+4. Pin the **LiveDub** icon from the extensions menu.
 
-> Rebuild (`npm run build`) and click the **reload** ↻ icon on the extension
+> Rebuild (`npm run build:chrome`) and click the **reload** ↻ on the extension
 > card after any code change.
 
 ---
 
 ## API Key Setup
 
-The extension uses the **Google Gemini API**. Requests are made directly from
-your browser to Google using your key — it is never sent anywhere else.
+The extension uses the **Google Gemini API**. Requests go directly from your
+browser to Google using your key — it is never sent anywhere else.
 
-1. Go to <https://aistudio.google.com/apikey> and sign in with a Google account.
-2. Click **Create API key** and copy the key (starts with `AIza...`).
-3. Ensure the **Gemini API** is enabled for your Google Cloud project (the
-   key creation flow usually does this for you; if not, enable it in Google
-   Cloud Console → APIs & Services).
-4. In the extension, click the **Settings** button (or open Options) and paste
-   your key.
-5. Click **Save all**.
+1. Go to <https://aistudio.google.com/apikey> and create a key (starts with
+   `AIza...`).
+2. Make sure the **Gemini API** is enabled for your Google Cloud project.
+3. Open the extension popup, paste the key into **API Configuration**, and
+   configure your **Target language**.
 
-The default models are:
-- **Speech recognition:** `gemini-3.5-transcribe` (dedicated speech-to-text model — auto-detects 85+ languages incl. Farsi, low-latency, smart transcription).
-- **Translation:** `gemini-2.5-flash` (good multilingual translation quality at low latency).
+Models:
 
-You can change them under **Advanced** in Settings. The streaming variant
-`gemini-3.5-transcribe-live` (Live API over WebSocket) is the planned Phase 1/2
-upgrade for sub-second, fully-streaming transcription.
-
-### Cost note
-
-Gemini Flash has a generous free tier. Transcription of short audio segments
-consumes tokens based on audio duration. Check Google's Gemini pricing for
-details — as a personal user this is usually negligible.
+- **Live dubbing:** `gemini-3.5-live-translate-preview` (Live API, voice → voice).
+- **Subtitles (REST) mode:** STT `gemini-3.5-transcribe` + translation
+  `gemini-2.5-flash`. Both editable under **Advanced** in the Settings page
+  (`chrome-extension://…/settings/index.html`, or right-click the icon).
 
 ---
 
 ## How to use
 
 1. Open any website with audio/video (e.g. a YouTube video) **in the active tab**.
-2. Click the **AI Tab Translator** extension icon.
-3. Pick your **Target language** and **Mode**.
-4. Click **Start**.
-5. The original tab audio is captured. Subtitles appear on the page and/or the
-   translation is spoken aloud.
-6. Click **Stop** when done, then **Export SRT / VTT** to download the session.
+2. Click the **LiveDub** extension icon.
+3. Set **Target language**, choose the **Playback delay** (e.g. 5 s).
+4. Toggle **Low bandwidth (8 kHz)** only if your network is slow.
+5. Click **Start**. The original keeps playing; after the delay, the dubbed
+   voice joins it. The popup shows the session as **Translating** with a
+   segment counter.
+6. Click **Stop** when done. Switching tabs does **not** stop the dub — the
+   original tab keeps translating until you stop it.
 
-> **Important:** capture must be triggered from the extension's popup (click the
-> icon) on the tab you want to capture. `chrome.tabCapture` follows
-> `activeTab`-style rules.
+> **Important:** capture must be started from the popup on the tab you want to
+> dub. `chrome.tabCapture` follows active-tab rules.
 
 ---
 
-## Notes & limitations (MVP)
+## Notes & limitations
 
-- **Voice dubbing** uses the browser's built-in `speechSynthesis` voices, which
-  vary per OS. Quality and available languages depend on installed system
-  voices. This keeps everything offline and free; a future phase could route
-  TTS through an AI API (ElevenLabs, Gemini, etc.).
-- **Muting the original audio** uses `chrome.tabs.update(..., { muted: true })`,
-  which is best-effort in some Chrome builds.
-- Latency depends on Gemini round-trip time and segment length; expect roughly
-  1.5–4 s for a short sentence.
-- The MV3 service worker is stateless and can sleep; the heavy processing lives
-  in the offscreen document, which keeps streaming state alive during a session.
+- **Latency:** even with the delay set to *Off*, the Live API adds ~1–3 s of
+  its own processing (turn detection + synthesis). The delay setting is added
+  **on top** of that.
+- **Mute original is the default** — with `muteOriginal` on, the delay only
+  adds latency to the single audible track; disable mute if you want the
+  original plus the delayed dub.
+- **8 kHz mode is opt-in** and not guaranteed by the Gemini Live API — if a
+  model rejects it, a clear error appears; turn the toggle off.
+- **Network resilience:** transient failures (blips, quota, 5xx) do not stop
+  the session — the engine reconnects with backoff. Only fatal errors (bad API
+  key, permission denied) stop it, and the UI reflects that.
+- On very weak/lossy networks, the dubbed voice may have audible gaps; lowering
+  the delay and enabling 8 kHz mode helps.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---|---|
+| “Translating” but no audio after a network drop | Automatic; reconnects within seconds. Watch the popup for a status change. |
+| Switched tabs and the dub stopped | Old builds stopped; current builds re-capture the original tab automatically. If it still stops repeatedly, the tab may have been discarded — press **Stop** then **Start** again. |
+| Error appears on Start | Wrong API key, quota, or model rejection — fix the key or check the message. |
+| Content pages show “cannot be captured” | `chrome://` pages can't be captured; use a normal website. |
 
 ---
 
 ## Development
 
 - **Typecheck:** `npm run typecheck`
-- **Build:** `npm run build`
-- **Structure** (`src/`):
-  - `background/` — service worker
-  - `content/` — overlay + message handling (compiled as IIFE)
+- **Build (Chrome):** `npm run build:chrome`
+- **Structure (`src/`):**
+  - `background/` — MV3 service worker (state persistence, watchdogs, messaging)
+  - `offscreen/` — audio engine page (capture, Live WebSocket, REST pipeline)
+  - `audio/` — AudioWorklet processors (capture, playback + delay line)
   - `popup/`, `settings/` — React pages
-  - `offscreen/` — audio engine page
-  - `audio/` — AudioWorklet + WAV encoder
-  - `services/` — Gemini, STT, translation, TTS, export, languages, storage
-
-### Roadmap
-
-- **Phase 1 (done):** capture, Gemini STT, translation, subtitle overlay, popup/settings.
-- **Phase 2 (in progress):** TTS + audio playback + synchronization.
-- **Phase 3:** speaker detection and multiple voices.
+  - `content/` — TTS playback listener for Subtitles mode
+  - `services/` — Gemini REST client, Live session, settings, languages, logging
+  - `platform/browser.ts` — cross-browser `chrome`/`browser` surface
 
 ---
 
-## Security
+## Security & privacy
 
-- Permissions are limited to what is required: `tabs`, `activeTab`, `tabCapture`,
-  `storage`, `scripting`, `offscreen`.
-- The API key is stored **only** in `chrome.storage.local` and is never sent to
-  any server other than the API provider you configure.
-- No remote code execution. Everything is bundled locally.
-- No tracking or hidden network calls.
+- Permissions are limited to `tabs`, `activeTab`, `tabCapture`, `storage`,
+  `scripting`, `offscreen`; host permission covers only
+  `generativelanguage.googleapis.com`.
+- The API key is stored **only** in `chrome.storage.local` (plain text, MV3
+  limitation) and is sent only to Google. Note: the Live WebSocket carries the
+  key as a `?key=` query parameter, so it is visible in DevTools network
+  inspection — avoid sharing DevTools traces.
+- No remote code execution, no tracking, no hidden network calls.
+
+---
+
+## Roadmap (short)
+
+- [x] Live voice dubbing via Gemini Live API
+- [x] Configurable playback delay
+- [x] Low-bandwidth uplink mode
+- [x] Tab-switch resilience + self-healing lifecycle
+- [ ] Verify 8 kHz acceptance across Gemini models
+- [ ] Rework the Firefox build or drop the target
