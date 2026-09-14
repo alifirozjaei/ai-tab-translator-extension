@@ -1,4 +1,4 @@
-# LiveDub — AI Audio Translator
+# AI Tab Translator
 
 A Chrome extension that provides **real-time AI voice translation (dubbing)** for
 audio/video playing in a tab. The original speech is dubbed into your chosen
@@ -95,7 +95,7 @@ npm install
 npm run build:chrome
 ```
 
-Output goes to `release/chrome/` plus `release/livedub-chrome-v0.1.0.zip`.
+Output goes to `release/chrome/` plus `release/ai-tab-translator-chrome-v0.1.0.zip`.
 
 Other targets: `npm run build:edge`, `npm run build:firefox`, `npm run build:all`.
 
@@ -104,7 +104,7 @@ Other targets: `npm run build:edge`, `npm run build:firefox`, `npm run build:all
 1. Open `chrome://extensions`.
 2. Enable **Developer mode** (top-right toggle).
 3. Click **Load unpacked** and select the **`release/chrome`** folder.
-4. Pin the **LiveDub** icon from the extensions menu.
+4. Pin the **AI Tab Translator** icon from the extensions menu.
 
 > Rebuild (`npm run build:chrome`) and click the **reload** ↻ on the extension
 > card after any code change.
@@ -134,7 +134,7 @@ Models:
 ## How to use
 
 1. Open any website with audio/video (e.g. a YouTube video) **in the active tab**.
-2. Click the **LiveDub** extension icon.
+2. Click the **AI Tab Translator** extension icon.
 3. Set **Target language**, choose the **Playback delay** (e.g. 5 s).
 4. Toggle **Low bandwidth (8 kHz)** only if your network is slow.
 5. Click **Start**. The original keeps playing; after the delay, the dubbed
@@ -213,9 +213,9 @@ The workflow:
 4. Fails (before any Release is created) if any expected ZIP is missing.
 5. Publishes a GitHub Release marked **latest**, with auto-generated release
    notes and the Chrome, Edge, and Firefox ZIPs attached:
-   - `release/livedub-chrome-v<VERSION>.zip`
-   - `release/livedub-edge-v<VERSION>.zip`
-   - `release/livedub-firefox-v<VERSION>.zip`
+   - `release/ai-tab-translator-chrome-v<VERSION>.zip`
+   - `release/ai-tab-translator-edge-v<VERSION>.zip`
+   - `release/ai-tab-translator-firefox-v<VERSION>.zip`
 
 New versions are the same flow:
 

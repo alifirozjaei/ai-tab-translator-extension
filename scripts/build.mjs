@@ -35,7 +35,7 @@ async function buildTarget(target) {
   cpSync(resolve(root, manifest), resolve(outDir, 'manifest.json'));
   verify(outDir);
   const version = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).version;
-  const archive = resolve(release, `livedub-${target}-v${version}.zip`);
+  const archive = resolve(release, `ai-tab-translator-${target}-v${version}.zip`);
   execFileSync('zip', ['-qr', archive, '.'], { cwd: outDir });
   console.log(`>>> ${target} package: ${archive}`);
 }
