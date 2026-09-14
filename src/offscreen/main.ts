@@ -34,6 +34,56 @@ let liveSession: LiveTranslateSession | null = null;
 let originalGain: GainNode | null = null;
 let translatedGain: GainNode | null = null;
 
+// Lifecycle: keep enough state to auto-heal when Chrome suspends the audio
+// context or drops the live WebSocket while the session is still active.
+let currentSettings: AppSettings | null = null;
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+let reconnecting = false;
+let lastSendErrLog = 0;
+let lastLiveErrorAt = 0;
+// Every session is stamped with a generation. Stale sessions (superseded by a
+// reconnect, or closed by Stop) have their callbacks ignored, so a leaked or
+// old socket can never corrupt the live one.
+let sessionGeneration = 0;
+// Serializes start/stop transitions so Stop during Start cannot corrupt state.
+let lifecycleLock: Promise<void> = Promise.resolve();
+// Set synchronously by the STOP handler (before the serialized stop runs) so a
+// Start that is still awaiting media/worklet setup can abort early (M3).
+let stopRequested = false;
+let pipelineMode: 'live' | 'rest' = 'live';
+let reconnectAttempts = 0;
+let nextRetryAt = 0;
+let queuedSegments = 0;
+let captureTabId: number | null = null;
+
+function sendStatus(state: 'active' | 'idle' | 'starting' | 'error', error?: string): void {
+  browserApi.runtime
+    .sendMessage({ type: 'STATUS', state, error, tabId: captureTabId ?? undefined })
+    .catch(() => {});
+}
+
+// Transient failures (network drops, rate limiting, 5xx) must NOT kill the
+// capture. Only auth/validation errors are fatal. Matching is structural: never
+// match bare status digits inside free text (e.g. "1500ms", "samples=51200").
+// A bare "quota" is NOT transient: a terminal 403 billing/quota failure would
+// otherwise be swallowed forever (only 429/rate-limit/retry-in is retryable).
+function isTransientError(error: unknown): boolean {
+  const m = describeError(error).toLowerCase();
+  return (
+    /(^|[^0-9])http 5\d\d([^0-9]|$)/.test(m) ||
+    /(^|[^0-9])http 429([^0-9]|$)/.test(m) ||
+    /rate limit|retry in|resource_exhausted|network|failed to fetch|socket|websocket|timeout|timed out|abort|unavailable|overloaded|econn|eai_again/i.test(m)
+  );
+}
+
+function isFatalLiveError(message: string, status?: string, code?: number): boolean {
+  // gRPC-style codes arrive on the BidiGenerateContent socket (3=INVALID_ARGUMENT,
+  // 5=NOT_FOUND, 7=PERMISSION_DENIED, 16=UNAUTHENTICATED); REST uses HTTP codes.
+  if (code && [3, 5, 7, 16, 400, 401, 403, 404].includes(code)) return true;
+  if (status && /INVALID_ARGUMENT|PERMISSION_DENIED|UNAUTHENTICATED|NOT_FOUND|FAILED_PRECONDITION|OUT_OF_RANGE|UNIMPLEMENTED/.test(status)) return true;
+  return /api key|permission denied|unauthorized|forbidden|billing|enable billing|invalid argument|not found/i.test(message);
+}
+
 function limiter(model: string, perMinute: number): RateLimiter {
   let lim = rateLimiters.get(model);
   if (!lim || lim.perMinute !== perMinute) {
@@ -45,28 +95,46 @@ function limiter(model: string, perMinute: number): RateLimiter {
 
 browserApi.runtime.sendMessage({ type: 'OFFSCREEN_READY' }).catch(() => {});
 
-browserApi.runtime.onMessage.addListener((message: any) => {
+browserApi.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
+  if (message?.type === 'PING') {
+    // Quick liveness probe from the SW watchdog (M5): a response proves this
+    // document is alive, so the SW must not destructively rearm it.
+    sendResponse?.({ ok: true });
+    return;
+  }
   if (message?.type === 'START_CAPTURE') {
     const streamId = (message.streamId as string | undefined) ?? '';
-    startCapture(message.settings as AppSettings, streamId).catch((error) => reportError(error));
+    captureTabId = (message.tabId as number | undefined) ?? null;
+    stopRequested = false;
+    runLifecycle(() => startCapture(message.settings as AppSettings, streamId).catch((error) => reportError(error)));
   } else if (message?.type === 'STOP_CAPTURE') {
-    stopCapture();
+    stopRequested = true;
+    runLifecycle(stopCapture);
   } else if (message?.type === 'UPDATE_SETTINGS') {
     const settings = message.settings as AppSettings;
     if (translatedGain) translatedGain.gain.value = settings.translatedVolume;
     if (originalGain) originalGain.gain.value = settings.muteOriginal ? 0 : settings.originalVolume;
+    if (playbackNode) playbackNode.port.postMessage({ type: 'delay', ms: settings.playbackDelayMs });
   }
 });
 
+// Equivalent of a mutex: start/stop transitions run one after another, so a
+// STOP_CAPTURE arriving mid-Start can no longer race the setup awaits.
+function runLifecycle(fn: () => Promise<void>): Promise<void> {
+  lifecycleLock = lifecycleLock.then(fn).catch(() => {});
+  return lifecycleLock;
+}
+
 browserApi.tabCapture?.onStatusChanged?.addListener((info) => {
   if (info.status === 'stopped' && running) {
-    stopCapture();
-    browserApi.runtime.sendMessage({ type: 'STATUS', state: 'idle' }).catch(() => {});
+    runLifecycle(stopCapture);
+    sendStatus('idle');
   }
 });
 
 async function startCapture(settings: AppSettings, streamId: string): Promise<void> {
   if (running) await stopCapture();
+  stopRequested = false;
   running = true;
   setStatus('starting');
   log('starting capture');
@@ -78,11 +146,21 @@ async function startCapture(settings: AppSettings, streamId: string): Promise<vo
   log(`capturing with streamId=${streamId ? 'present' : 'none'}`);
   mediaStream = await captureTabAudio(streamId);
   log(`got media stream, audio tracks: ${mediaStream.getAudioTracks().length}`);
+  if (stopRequested) {
+    await stopCapture();
+    throw new Error('Capture stopped while starting.');
+  }
 
   if (settings.liveTranslateEnabled) {
+    pipelineMode = 'live';
     await startLiveTranslate(settings);
   } else {
+    pipelineMode = 'rest';
     await startRestPipeline(settings);
+  }
+  if (stopRequested) {
+    await stopCapture();
+    throw new Error('Capture stopped while starting.');
   }
 }
 
@@ -106,7 +184,7 @@ async function startLiveTranslate(settings: AppSettings): Promise<void> {
     numberOfInputs: 0,
     numberOfOutputs: 1,
     outputChannelCount: [1],
-    processorOptions: { targetRate: ctx.sampleRate },
+    processorOptions: { targetRate: ctx.sampleRate, delayMs: settings.playbackDelayMs },
   });
 
   const dubGain = ctx.createGain();
@@ -132,37 +210,149 @@ async function startLiveTranslate(settings: AppSettings): Promise<void> {
 
   log(`audio mix: translated=${Math.round(settings.translatedVolume * 100)}%, original=${settings.muteOriginal ? 'muted' : `${Math.round(settings.originalVolume * 100)}%`}`);
 
-  liveSession = new LiveTranslateSession(
+  liveSession = buildLiveSession(settings, ++sessionGeneration);
+  currentSettings = settings;
+  try {
+    await liveSession.start();
+    log('live: session ready');
+  } catch (error) {
+    // A transient setup failure (network blip, handshake 503, slow TLS) must
+    // not kill the session: leave liveSession null and let the watchdog retry.
+    liveSession?.close();
+    liveSession = null;
+    if (!isTransientError(error)) {
+      reportError(error);
+      return;
+    }
+    reconnectAttempts++;
+    nextRetryAt = Date.now() + 4000;
+    log(`live: initial connect failed (${describeError(error)}); will retry in the background`, 'error');
+  }
+  armWatchdog();
+
+  setStatus('active');
+  log('capture active (live translate)');
+  sendStatus('active');
+}
+
+function buildLiveSession(settings: AppSettings, generation: number): LiveTranslateSession {
+  return new LiveTranslateSession(
     settings.geminiApiKey,
     settings.liveTranslateModel,
     settings.targetLang,
     {
       onAudio: (pcm24k) => {
+        if (generation !== sessionGeneration || !running) return;
         playbackNode?.port.postMessage({ type: 'audio', data: pcm24k }, [pcm24k.buffer]);
       },
       onTurnComplete: () => {},
       onInterrupted: () => {
+        if (generation !== sessionGeneration || !running) return;
         playbackNode?.port.postMessage({ type: 'clear' });
       },
-      onState: (s) => log(`live state: ${s}`),
-      onError: (m) => reportError(m),
+      onState: (s) => {
+        if (generation !== sessionGeneration) return;
+        log(`live state: ${s}`);
+      },
+      onError: (m, info) => {
+        if (generation !== sessionGeneration || !running) return;
+        log(`live error: ${m}`, 'error');
+        if (isFatalLiveError(m, info?.status, info?.code)) {
+          reportError(new Error(m));
+          return;
+        }
+        // Transient server error (quota/5xx): drop the socket (throttled) and
+        // let the watchdog reconnect. Never permanently stop the session.
+        const now = Date.now();
+        if (now - lastLiveErrorAt > 8000) {
+          lastLiveErrorAt = now;
+          try {
+            liveSession?.close();
+          } catch {
+            /* ignore */
+          }
+        }
+      },
     },
     false,
     false,
   );
+}
 
-  await liveSession.start();
-  log('live translate session ready');
+// Chrome suspends AudioContexts in backgrounded documents and can drop the
+// live WebSocket. This watchdog revives both while the session is running.
+function armWatchdog(): void {
+  if (watchdogTimer) clearInterval(watchdogTimer);
+  watchdogTimer = setInterval(() => {
+    if (!running || stopRequested) return;
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(() => {});
+    }
+    // Reconnect both when the socket died AND when there is no session at all
+    // (e.g. a previous reconnect attempt failed); otherwise a single network
+    // blip would wedge the pipeline forever. Only in live mode: in REST mode
+    // there is no live socket to reconnect (and building one would be a paid
+    // session nobody feeds).
+    if (pipelineMode === 'live' && (!liveSession || !liveSession.isReady) && !reconnecting) {
+      void restartLiveSession();
+    }
+  }, 4000);
+}
 
-  setStatus('active');
-  log('capture active (live translate)');
-  browserApi.runtime.sendMessage({ type: 'STATUS', state: 'active' }).catch(() => {});
+function disarmWatchdog(): void {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
+}
+
+async function restartLiveSession(): Promise<void> {
+  const settings = currentSettings;
+  if (!settings || !running || reconnecting || pipelineMode !== 'live' || stopRequested) return;
+  // Exponential backoff with jitter so a dead server doesn't trigger a hot loop.
+  if (Date.now() < nextRetryAt) return;
+  const generation = ++sessionGeneration;
+  reconnecting = true;
+  log('live: connection lost, reconnecting...');
+  try {
+    liveSession?.close();
+    liveSession = null;
+    const session = buildLiveSession(settings, generation);
+    await session.start();
+    // If Stop or another reconnect superseded us while start() was pending,
+    // toss the new session instead of installing a leaked second socket.
+    if (generation !== sessionGeneration || !running || stopRequested) {
+      session.close();
+      return;
+    }
+    liveSession = session;
+    reconnectAttempts = 0;
+    nextRetryAt = 0;
+    log('live: reconnected');
+  } catch (error) {
+    reconnectAttempts++;
+    const backoff = Math.min(30000, 4000 * 2 ** Math.min(reconnectAttempts - 1, 3));
+    nextRetryAt = Date.now() + backoff + Math.floor(Math.random() * 1000);
+    log(`live: reconnect failed (attempt ${reconnectAttempts}, next in ${Math.round(backoff / 1000)}s): ${describeError(error)}`, 'error');
+  } finally {
+    reconnecting = false;
+  }
 }
 
 function sendLiveChunk(i16: Int16Array): void {
-  if (!liveSession?.isReady) return;
+  const throttledLog = (line: string) => {
+    const now = Date.now();
+    if (now - lastSendErrLog > 1000) {
+      lastSendErrLog = now;
+      log(line, 'error');
+    }
+  };
+  if (!liveSession?.isReady) {
+    throttledLog('live: audio chunk not sent (session not ready)');
+    return;
+  }
   if (!liveSession.sendAudio(int16ToBase64(i16))) {
-    log('live: audio chunk not sent (session not ready)', 'error');
+    throttledLog('live: audio chunk not sent');
   }
 }
 
@@ -199,6 +389,8 @@ async function startRestPipeline(settings: AppSettings): Promise<void> {
       enqueueSegment(e.data, settings);
     }
   };
+  currentSettings = settings;
+  armWatchdog();
 
   const restOriginalGain = ctx.createGain();
   restOriginalGain.gain.value = settings.muteOriginal ? 0 : settings.originalVolume;
@@ -211,7 +403,7 @@ async function startRestPipeline(settings: AppSettings): Promise<void> {
 
   setStatus('active');
   log('capture active (rest pipeline)');
-  browserApi.runtime.sendMessage({ type: 'STATUS', state: 'active' }).catch(() => {});
+  sendStatus('active');
 }
 
 async function captureTabAudio(streamId: string): Promise<MediaStream> {
@@ -264,14 +456,29 @@ function captureTabStream(): Promise<MediaStream> {
 }
 
 function enqueueSegment(data: any, settings: AppSettings): void {
-  pipeline = pipeline.then(() =>
-    handleSegment(data, settings).catch((error) => {
-      const detail = describeError(error);
-      log(`segment error: ${detail}`, 'error');
-      logger.error('Segment processing failed. Full error:', error);
-      reportError(error);
-    }),
-  );
+  // Bound the serial queue: each link can take tens of seconds (rate limiter +
+  // retries) while the VAD keeps posting segments; without a cap memory and
+  // audio-freshness degrade without limit.
+  if (queuedSegments >= 4) {
+    log(`segment dropped (backlog=${queuedSegments})`, 'error');
+    return;
+  }
+  queuedSegments++;
+  pipeline = pipeline
+    .then(() =>
+      handleSegment(data, settings).catch((error) => {
+        const detail = describeError(error);
+        log(`segment error: ${detail}`, 'error');
+        logger.error('Segment processing failed. Full error:', error);
+        // Network hiccups must not stop the session; drop this segment and
+        // keep listening. Only hard failures stop the capture.
+        if (isTransientError(error)) return;
+        reportError(error);
+      }),
+    )
+    .finally(() => {
+      queuedSegments--;
+    });
 }
 
 async function handleSegment(data: any, settings: AppSettings): Promise<void> {
@@ -371,17 +578,30 @@ async function handleSegment(data: any, settings: AppSettings): Promise<void> {
 
 function reportError(error: unknown): void {
   running = false;
+  sessionGeneration++;
+  disarmWatchdog();
+  currentSettings = null;
+  teardownGraph();
   const detail = describeError(error);
   setStatus(`error: ${detail}`);
   log(`error: ${detail}`, 'error');
   logger.error('Capture error. Full error:', error);
+  sendStatus('error', detail);
   browserApi.runtime.sendMessage({ type: 'ERROR', message: detail }).catch(() => {});
 }
 
 async function stopCapture(): Promise<void> {
   running = false;
+  sessionGeneration++;
+  disarmWatchdog();
+  currentSettings = null;
+  stopRequested = false;
   setStatus('idle');
   log('stopped');
+  teardownGraph();
+}
+
+function teardownGraph(): void {
   try {
     liveSession?.close();
   } catch {
@@ -399,7 +619,7 @@ async function stopCapture(): Promise<void> {
     /* ignore */
   }
   try {
-    await audioCtx?.close();
+    void audioCtx?.close();
   } catch {
     /* ignore */
   }
@@ -410,4 +630,11 @@ async function stopCapture(): Promise<void> {
   playbackNode = null;
   mediaStream?.getTracks().forEach((t) => t.stop());
   mediaStream = null;
+  // Reset reconnect/session bookkeeping so a later Start begins clean.
+  reconnectAttempts = 0;
+  nextRetryAt = 0;
+  lastLiveErrorAt = 0;
+  lastSendErrLog = 0;
+  pipeline = Promise.resolve();
+  queuedSegments = 0;
 }

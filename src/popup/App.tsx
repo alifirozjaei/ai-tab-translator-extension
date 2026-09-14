@@ -151,6 +151,40 @@ export default function App() {
           </div>
         </section>
 
+        {/* Playback Delay */}
+        <section className="settings-card">
+          <h2 className="card-heading">Playback Delay</h2>
+          <div className="volume-group">
+            <div className="volume-header">
+              <span className="field-label">Start dub after</span>
+              <span className="volume-value">{(settings.playbackDelayMs / 1000).toFixed(1)}s</span>
+            </div>
+            <input
+              aria-label="Playback delay in seconds"
+              className="volume-slider"
+              type="range"
+              min="0"
+              max="10000"
+              step="500"
+              value={settings.playbackDelayMs}
+              onChange={(e) => update({ playbackDelayMs: Number(e.target.value) })}
+            />
+            <div className="delay-presets">
+              {[0, 1000, 2000, 3000, 5000, 10000].map((ms) => (
+                <button
+                  key={ms}
+                  type="button"
+                  onClick={() => update({ playbackDelayMs: ms })}
+                  className={`delay-chip ${settings.playbackDelayMs === ms ? 'active' : ''}`}
+                >
+                  {ms === 0 ? 'Off' : `${ms / 1000}s`}
+                </button>
+              ))}
+            </div>
+            <p className="delay-hint">The original audio plays first; the translated voice starts after this delay.</p>
+          </div>
+        </section>
+
         {/* Audio Settings */}
         <section className="settings-card">
           <h2 className="card-heading">Audio Settings</h2>

@@ -15,6 +15,8 @@ export interface AppSettings {
   muteOriginal: boolean;
   originalVolume: number;
   translatedVolume: number;
+  /** ms to wait after the original audio before playing the dub (0 = off). */
+  playbackDelayMs: number;
   interimEnabled: boolean;
   sttRateLimitPerMinute: number;
   maxSttRetries: number;
@@ -43,10 +45,11 @@ export type RuntimeMessage =
   | { type: 'STOP' }
   | { type: 'UPDATE_SETTINGS'; settings: AppSettings }
   | { type: 'GET_STATUS' }
+  | { type: 'PING' }
   | { type: 'OFFSCREEN_READY' }
   | { type: 'START_CAPTURE'; settings: AppSettings; tabId: number; streamId?: string }
   | { type: 'STOP_CAPTURE' }
-  | { type: 'STATUS'; state: CaptureState; error?: string }
+  | { type: 'STATUS'; state: CaptureState; error?: string; tabId?: number }
   | { type: 'ERROR'; message: string }
   | { type: 'TRANSLATION_RESULT'; result: TranslationResult }
   | { type: 'PLAY_TRANSLATION'; result: TranslationResult; volume: number }

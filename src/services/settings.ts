@@ -19,12 +19,39 @@ export const DEFAULT_SETTINGS: AppSettings = {
   muteOriginal: true,
   originalVolume: 0.2,
   translatedVolume: 1,
+  playbackDelayMs: 5000,
   interimEnabled: false,
   sttRateLimitPerMinute: 3,
   maxSttRetries: 3,
 };
 
 const MAX_SEGMENTS = 500;
+
+export const MAX_PLAYBACK_DELAY_MS = 10_000;
+
+function clampDelay(value: unknown, fallback: number): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(0, Math.min(MAX_PLAYBACK_DELAY_MS, Math.round(numeric)));
+}
+
+function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(numeric)));
+}
+
+// Keep all numeric settings inside their valid ranges. A 0 maxSegmentMs would
+// otherwise make the VAD worklet emit a segment on every sample (audio-rate
+// postMessage storm) and a negative interim interval would spam interims.
+function clampSettings(s: AppSettings): void {
+  s.playbackDelayMs = clampDelay(s.playbackDelayMs, DEFAULT_SETTINGS.playbackDelayMs);
+  s.interimIntervalMs = clampInt(s.interimIntervalMs, 500, 5000, DEFAULT_SETTINGS.interimIntervalMs);
+  s.silenceThresholdMs = clampInt(s.silenceThresholdMs, 200, 5000, DEFAULT_SETTINGS.silenceThresholdMs);
+  s.maxSegmentMs = clampInt(s.maxSegmentMs, 5000, 60000, DEFAULT_SETTINGS.maxSegmentMs);
+  s.sttRateLimitPerMinute = clampInt(s.sttRateLimitPerMinute, 1, 100, DEFAULT_SETTINGS.sttRateLimitPerMinute);
+  s.maxSttRetries = clampInt(s.maxSttRetries, 0, 10, DEFAULT_SETTINGS.maxSttRetries);
+}
 
 export async function getSettings(): Promise<AppSettings> {
   const stored = await browserApi.storage.local.get(SETTINGS_KEY);
@@ -40,6 +67,7 @@ export async function getSettings(): Promise<AppSettings> {
   // Older builds stored volume as a percentage (or an invalid slider value).
   merged.originalVolume = normalizeVolume(merged.originalVolume, DEFAULT_SETTINGS.originalVolume);
   merged.translatedVolume = normalizeVolume(merged.translatedVolume, DEFAULT_SETTINGS.translatedVolume);
+  clampSettings(merged);
   return merged;
 }
 
@@ -58,6 +86,7 @@ export async function saveSettings(patch: Partial<AppSettings>): Promise<AppSett
     ...patch,
     liveTranslateModel: LIVE_TRANSLATE_MODEL,
   };
+  clampSettings(next);
   await browserApi.storage.local.set({ [SETTINGS_KEY]: next });
   return next;
 }

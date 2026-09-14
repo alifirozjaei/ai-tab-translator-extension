@@ -1,4 +1,5 @@
 const LIVE_TARGET_RATE = 16000;
+// 1600 samples @16kHz = 100ms of audio per packet sent to the Live API.
 const LIVE_CHUNK = 1600;
 const LIVE_OUTPUT_RATE = 24000;
 
@@ -42,23 +43,44 @@ class PcmStreamProcessor extends AudioWorkletProcessor {
 
 class PlaybackProcessor extends AudioWorkletProcessor {
   private readonly targetRate: number;
-  private readonly ring: Float32Array;
-  private head = 0;
-  private tail = 0;
+  // Delay line: samples wait here until `delaySec` after their arrival time.
+  private readonly pending: Float32Array;
+  private readonly pendingTimes: Float64Array;
+  private pw = 0;
+  private pr = 0;
+  private pc = 0;
+  private delaySec = 0;
+  // On interruption the buffer fades out over ~160ms instead of being hard-
+  // flushed, so already-paid dub is not lost and there is no click.
+  private fading = false;
+  private fadeRemain = 0;
+  private fadeTotal = 0;
 
   constructor(options?: AudioWorkletNodeOptions) {
     super();
     const opts = (options?.processorOptions ?? {}) as Record<string, number>;
     this.targetRate = opts.targetRate ?? sampleRate;
-    this.ring = new Float32Array(this.targetRate * 12);
+    // Fixed capacity at the maximum possible delay (10s) + 3s headroom. It is
+    // NOT resized on live delay changes, so sizing for the max avoids the
+    // overflow/drop that a delay increase would otherwise cause.
+    const cap = Math.round(this.targetRate * 13);
+    this.pending = new Float32Array(cap);
+    this.pendingTimes = new Float64Array(cap);
+    this.delaySec = Math.min(10, Math.max(0, (opts.delayMs ?? 0) / 1000));
     this.port.onmessage = (e: MessageEvent) => this.handle(e.data);
   }
 
   private handle(data: any): void {
     if (!data) return;
     if (data.type === 'clear') {
-      this.head = 0;
-      this.tail = 0;
+      // Fade out the pending buffer instead of dropping it.
+      this.fading = true;
+      this.fadeTotal = Math.round(this.targetRate * 0.16);
+      this.fadeRemain = this.fadeTotal;
+      return;
+    }
+    if (data.type === 'delay' && typeof data.ms === 'number') {
+      this.delaySec = Math.min(10, Math.max(0, data.ms / 1000));
       return;
     }
     if (data.type === 'audio' && data.data instanceof Int16Array) {
@@ -67,29 +89,44 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   }
 
   private appendInt16(i16: Int16Array): void {
+    this.fading = false;
     const ratio = LIVE_OUTPUT_RATE / this.targetRate;
     const n = i16.length;
     if (n === 0) return;
     const outLen = Math.floor(n / ratio);
+    const now = currentTime;
     for (let oi = 0; oi < outLen; oi++) {
       const pos = oi * ratio;
       const i0 = Math.floor(pos);
       const i1 = Math.min(i0 + 1, n - 1);
       const frac = pos - i0;
       const s = (i16[i0] * (1 - frac) + i16[i1] * frac) / 32768;
-      this.ring[this.head] = s;
-      this.head = (this.head + 1) % this.ring.length;
-      if (this.head === this.tail) this.tail = (this.tail + 1) % this.ring.length;
+      this.pending[this.pw] = s;
+      this.pendingTimes[this.pw] = now;
+      this.pw = (this.pw + 1) % this.pending.length;
+      if (this.pc === this.pending.length) {
+        this.pr = (this.pr + 1) % this.pending.length;
+      } else {
+        this.pc++;
+      }
     }
   }
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const out = outputs[0]?.[0];
     if (!out) return true;
+    const now = currentTime;
     for (let i = 0; i < out.length; i++) {
-      if (this.tail !== this.head) {
-        out[i] = this.ring[this.tail];
-        this.tail = (this.tail + 1) % this.ring.length;
+      if (this.pc > 0 && now >= this.pendingTimes[this.pr] + this.delaySec) {
+        let sample = this.pending[this.pr];
+        if (this.fading) {
+          sample *= this.fadeTotal > 0 ? this.fadeRemain / this.fadeTotal : 0;
+          this.fadeRemain--;
+          if (this.fadeRemain <= 0) this.fading = false;
+        }
+        out[i] = sample;
+        this.pr = (this.pr + 1) % this.pending.length;
+        this.pc--;
       } else {
         out[i] = 0;
       }

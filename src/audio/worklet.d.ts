@@ -1,5 +1,6 @@
 declare const sampleRate: number;
 declare const currentFrame: number;
+declare const currentTime: number;
 declare const AudioWorkletProcessor: {
   prototype: AudioWorkletProcessor;
   new (options?: AudioWorkletNodeOptions): AudioWorkletProcessor;

@@ -7,7 +7,7 @@ export interface LiveTranslateHandlers {
   onTurnComplete?: () => void;
   onInterrupted?: () => void;
   onState?: (state: string) => void;
-  onError?: (message: string) => void;
+  onError?: (message: string, info?: { code?: number; status?: string }) => void;
 }
 
 const WS_URL =
@@ -16,6 +16,12 @@ const WS_URL =
 export class LiveTranslateSession {
   private ws: WebSocket | null = null;
   private ready = false;
+  // Once closed, pending socket callbacks are ignored so a superseded session
+  // can never fire into (or corrupt) the currently active one.
+  private dead = false;
+  // Handles for the pending setup promise so close() can settle it immediately.
+  private setupTimer: ReturnType<typeof setTimeout> | null = null;
+  private rejectSetup: ((e: Error) => void) | null = null;
 
   constructor(
     private readonly apiKey: string,
@@ -31,16 +37,20 @@ export class LiveTranslateSession {
   }
 
   start(): Promise<void> {
+    this.dead = false;
     return new Promise((resolve, reject) => {
       const url = `${WS_URL}?key=${encodeURIComponent(this.apiKey)}`;
       let settled = false;
       const ws = new WebSocket(url);
       this.ws = ws;
       ws.binaryType = 'arraybuffer';
+      this.rejectSetup = reject;
 
       const timeout = setTimeout(() => {
         if (!settled) {
           settled = true;
+          this.setupTimer = null;
+          this.rejectSetup = null;
           try {
             ws.close();
           } catch {
@@ -49,8 +59,19 @@ export class LiveTranslateSession {
           reject(new Error('Live session setup timed out after 15s.'));
         }
       }, 15000);
+      this.setupTimer = timeout;
+
+      // On any settle path, drop the class-level handles so close() knows the
+      // setup promise is no longer pending.
+      const onSettle = () => {
+        settled = true;
+        clearTimeout(timeout);
+        this.setupTimer = null;
+        this.rejectSetup = null;
+      };
 
       ws.onopen = () => {
+        if (this.dead) return;
         const setup: Record<string, unknown> = {
           model: `models/${this.model}`,
           generationConfig: {
@@ -71,6 +92,7 @@ export class LiveTranslateSession {
       };
 
       ws.onmessage = (ev) => {
+        if (this.dead) return;
         let raw: string;
         if (typeof ev.data === 'string') {
           raw = ev.data;
@@ -87,8 +109,7 @@ export class LiveTranslateSession {
 
         if (msg.setupComplete) {
           if (!settled) {
-            settled = true;
-            clearTimeout(timeout);
+            onSettle();
             this.ready = true;
             logger.info('live: setup complete');
           }
@@ -97,13 +118,14 @@ export class LiveTranslateSession {
 
         if (msg.error) {
           const em = msg.error?.message ?? 'Live API error';
+          const code = typeof msg.error?.code === 'number' ? (msg.error.code as number) : undefined;
+          const status = typeof msg.error?.status === 'string' ? (msg.error.status as string) : undefined;
           logger.error('live: server error', msg.error);
           if (!settled) {
-            settled = true;
-            clearTimeout(timeout);
+            onSettle();
             reject(new Error(em));
           } else {
-            this.handlers.onError?.(em);
+            this.handlers.onError?.(em, { code, status });
           }
           return;
         }
@@ -112,21 +134,21 @@ export class LiveTranslateSession {
       };
 
       ws.onerror = () => {
+        if (this.dead) return;
         logger.error('live: WebSocket network error');
         if (!settled) {
-          settled = true;
-          clearTimeout(timeout);
+          onSettle();
           reject(new Error('Live WebSocket network error.'));
         }
       };
 
       ws.onclose = (ev) => {
         this.ready = false;
+        if (this.dead) return;
         const reason = ev.reason || '(no reason)';
         logger.warn('live: WebSocket closed', { code: ev.code, reason });
         if (!settled) {
-          settled = true;
-          clearTimeout(timeout);
+          onSettle();
           reject(new Error(`Live WebSocket closed during setup (code ${ev.code}): ${reason}`));
         } else {
           this.handlers.onState?.('closed');
@@ -136,8 +158,10 @@ export class LiveTranslateSession {
   }
 
   sendAudio(dataBase64: string): boolean {
-    if (!this.isReady) return false;
+    if (this.dead || !this.isReady) return false;
+    // Backpressure: if the uplink is stalled, drop rather than grow the buffer.
     try {
+      if ((this.ws?.bufferedAmount ?? 0) > 64 * 1024) return false;
       this.ws!.send(
         JSON.stringify({
           realtimeInput: {
@@ -153,7 +177,16 @@ export class LiveTranslateSession {
   }
 
   close(): void {
+    this.dead = true;
     this.ready = false;
+    // Settle a pending setup immediately instead of letting the caller hang
+    // for up to the 15s timeout.
+    if (this.setupTimer) {
+      clearTimeout(this.setupTimer);
+      this.setupTimer = null;
+    }
+    this.rejectSetup?.(new Error('Live session closed during setup.'));
+    this.rejectSetup = null;
     try {
       this.ws?.close();
     } catch {

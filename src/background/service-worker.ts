@@ -7,7 +7,62 @@ let status: CaptureStatus = { state: 'idle', segments: 0 };
 let activeSettings: AppSettings | null = null;
 let offscreenReady = false;
 
+// Lifecycle: an MV3 service worker idles after ~30s and Chrome can terminate
+// the offscreen document. Session state is persisted to storage.session so a
+// worker restart rehydrates status/tab/settings and re-arms the watchdogs
+// instead of silently orphaning a capture the UI claims is running.
+let keepAliveTimer: number | null = null;
+let offscreenTimer: number | null = null;
+
+const SESSION_KEY = 'swSession';
+const sessionStorage = (browserApi.storage as unknown as {
+  session?: { get: (keys: string[]) => Promise<Record<string, unknown>>; set: (items: Record<string, unknown>) => Promise<void> };
+}).session;
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Rehydrate on every wake: top-level module scope runs whenever the worker
+// starts (fresh or resumed).
+void restoreSession();
+
+browserApi.runtime.onStartup?.addListener(() => {
+  void restoreSession();
+});
+browserApi.runtime.onInstalled?.addListener(() => {
+  void restoreSession();
+});
+
+async function persistSession(): Promise<void> {
+  if (!sessionStorage) return;
+  try {
+    await sessionStorage.set({
+      [SESSION_KEY]: { state: status.state, tabId: status.tabId ?? null, settings: activeSettings },
+    });
+  } catch (error) {
+    logger.warn('could not persist session state:', error);
+  }
+}
+
+async function restoreSession(): Promise<void> {
+  if (!sessionStorage) return;
+  try {
+    const stored = await sessionStorage.get([SESSION_KEY]);
+    const s = stored?.[SESSION_KEY] as
+      | { state?: string; tabId?: number | null; settings?: AppSettings | null }
+      | undefined;
+    if (!s || !s.state) return;
+    status.state = (s.state as CaptureStatus['state']) ?? 'idle';
+    if (typeof s.tabId === 'number') status.tabId = s.tabId;
+    activeSettings = s.settings ?? null;
+    if (status.state === 'active' || status.state === 'starting') {
+      armKeepAlive();
+      armOffscreenWatchdog();
+      logger.info('session restored from storage.session:', status.state);
+    }
+  } catch (error) {
+    logger.warn('could not restore session state:', error);
+  }
+}
 
 browserApi.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResponse) => {
   logger.debug('message:', message.type);
@@ -40,6 +95,19 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
     case 'STATUS':
       status.state = message.state;
       status.error = message.error;
+      if (typeof message.tabId === 'number') status.tabId = message.tabId;
+      if (message.state === 'idle' || message.state === 'error') {
+        // Every path that reports idle/error must disarm the timers; otherwise
+        // both intervals would keep the worker alive (and poll) forever.
+        disarmKeepAlive();
+        disarmOffscreenWatchdog();
+      } else {
+        // Re-arm on every active STATUS: a worker that just woke up has lost
+        // its timers and needs them back to keep self-healing working.
+        armKeepAlive();
+        armOffscreenWatchdog();
+      }
+      void persistSession();
       return { ok: true };
     case 'ERROR':
       status.state = 'error';
@@ -50,6 +118,7 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
       });
       await stopCapture();
       status = { state: 'error', segments: (await getSegments()).length, error: message.message };
+      void persistSession();
       return { ok: true };
     case 'TRANSLATION_RESULT':
       if (!message.result.interim) {
@@ -126,8 +195,101 @@ async function startCapture(settings: AppSettings): Promise<{ ok: boolean; error
   // misses the follow-up STATUS message.
   status = { state: 'active', tabId: tab.id, segments: (await getSegments()).length };
   logger.info('capture started on tab', tab.id, 'mode:', settings.mode);
+  armKeepAlive();
+  armOffscreenWatchdog();
+  void persistSession();
 
   return { ok: true };
+}
+
+let rearming = false;
+
+function armKeepAlive(): void {
+  if (keepAliveTimer) return;
+  // Each Chrome API call resets the service worker's idle timer, keeping it
+  // alive so the popup status stays fresh and STOP always works.
+  keepAliveTimer = setInterval(() => {
+    void browserApi.runtime.getPlatformInfo?.().catch(() => {});
+  }, 20_000) as unknown as number;
+}
+
+function disarmKeepAlive(): void {
+  if (keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+}
+
+function armOffscreenWatchdog(): void {
+  disarmOffscreenWatchdog();
+  // Chrome can terminate the offscreen document mid-session (e.g. during
+  // silence between turns). Recreate it and restart capture automatically.
+  offscreenTimer = setInterval(() => {
+    void checkOffscreen();
+  }, 5000) as unknown as number;
+}
+
+function disarmOffscreenWatchdog(): void {
+  if (offscreenTimer) {
+    clearInterval(offscreenTimer);
+    offscreenTimer = null;
+  }
+}
+
+async function checkOffscreen(): Promise<void> {
+  if (status.state !== 'active' && status.state !== 'starting') return;
+  if (!hasOffscreen || rearming) return;
+  rearming = true;
+  try {
+    const off = browserApi.offscreen as unknown as { hasDocument?: () => Promise<boolean> };
+    let alive = true;
+    try {
+      alive = off.hasDocument ? await off.hasDocument() : true;
+    } catch {
+      alive = false;
+    }
+    if (!alive) {
+      // A thrown hasDocument() is not proof of death: round-trip ping the
+      // document before deciding to destructively rearm (M5).
+      try {
+        const pong = await browserApi.runtime.sendMessage({ type: 'PING' } satisfies RuntimeMessage);
+        alive = pong?.ok === true;
+      } catch {
+        alive = false;
+      }
+    }
+    if (!alive) {
+      logger.warn('offscreen document was terminated; recreating capture');
+      await rearmCapture();
+    }
+  } finally {
+    rearming = false;
+  }
+}
+
+async function rearmCapture(): Promise<void> {
+  const tabId = status.tabId;
+  const settings = activeSettings;
+  if (!tabId || !settings) return;
+  try {
+    await ensureOffscreen();
+    let streamId: string | undefined;
+    try {
+      if (hasTabCapture) streamId = await browserApi.tabCapture.getMediaStreamId({ targetTabId: tabId });
+    } catch (error) {
+      logger.warn('could not re-acquire tab stream id:', error);
+    }
+    await browserApi.runtime.sendMessage({ type: 'START_CAPTURE', settings, tabId, streamId } satisfies RuntimeMessage);
+    logger.info('capture restarted after offscreen termination');
+    void persistSession();
+  } catch (error) {
+    logger.error('could not restart capture after offscreen termination:', error);
+    status = { state: 'error', segments: (await getSegments()).length, error: String(error) };
+    activeSettings = null;
+    disarmKeepAlive();
+    disarmOffscreenWatchdog();
+    void persistSession();
+  }
 }
 
 async function ensureOffscreen(): Promise<void> {
@@ -145,11 +307,31 @@ async function ensureOffscreen(): Promise<void> {
   }
 
   offscreenReady = false;
-  await browserApi.offscreen.createDocument({
-    url: browserApi.runtime.getURL('offscreen/index.html'),
-    reasons: ['USER_MEDIA', 'AUDIO_PLAYBACK'],
-    justification: 'Capture tab audio, detect and translate speech, and play dubbed audio in the browser.',
-  });
+  try {
+    await browserApi.offscreen.createDocument({
+      url: browserApi.runtime.getURL('offscreen/index.html'),
+      reasons: ['USER_MEDIA', 'AUDIO_PLAYBACK'],
+      justification: 'Capture tab audio, detect and translate speech, and play dubbed audio in the browser.',
+    });
+  } catch (error) {
+    // Chrome only allows one offscreen document per extension. A racing call
+    // (or a rearm that landed after the doc was recreated) throws here; if a
+    // document now exists the session is still fine, so keep going.
+    const hasDocPromise = (browserApi.offscreen as unknown as { hasDocument?: () => Promise<boolean> }).hasDocument?.();
+    let hasDoc = false;
+    if (hasDocPromise) {
+      try {
+        hasDoc = await hasDocPromise;
+      } catch {
+        /* fall through */
+      }
+    }
+    const hasContexts =
+      typeof runtime.getContexts === 'function' &&
+      (await runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] })).length > 0;
+    if (!hasDoc && !hasContexts) throw error;
+    logger.warn('offscreen document already exists; continuing');
+  }
 
   const deadline = Date.now() + 5000;
   while (!offscreenReady && Date.now() < deadline) {
@@ -179,7 +361,10 @@ async function relaySegment(result: TranslationResult): Promise<void> {
 async function stopCapture(): Promise<{ ok: boolean }> {
   const tabId = status.tabId;
   const wasRunning = status.state === 'active' || status.state === 'starting';
+  disarmKeepAlive();
+  disarmOffscreenWatchdog();
   status = { state: 'idle', segments: (await getSegments()).length };
+  void persistSession();
 
   await browserApi.runtime.sendMessage({ type: 'STOP_CAPTURE' } satisfies RuntimeMessage).catch(() => {});
 
