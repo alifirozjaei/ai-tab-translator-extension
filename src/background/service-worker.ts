@@ -27,6 +27,11 @@ let sessionVersion = 0;
 // 'active' (e.g. it died mid-handshake and no STATUS ever arrived), fail
 // loudly instead of leaving the UI on "Starting..." forever (N12).
 let startingTimer: number | null = null;
+// Anti-thrash guard for tab-switch re-capture: if a freshly re-captured stream
+// dies again within REARM_COOLDOWN_MS, Chrome is aggressively killing hidden
+// captures — give up and stop cleanly instead of looping rearm forever.
+const REARM_COOLDOWN_MS = 5000;
+let lastRearmTs = 0;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -143,6 +148,7 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
       if (typeof message.tabId === 'number') status.tabId = message.tabId;
       if (message.state === 'starting') armStartingTimer();
       else disarmStartingTimer();
+      if (message.state === 'active') lastRearmTs = 0;
       if (message.state === 'idle' || message.state === 'error') {
         // Every path that reports idle/error must disarm the timers; otherwise
         // both intervals would keep the worker alive (and poll) forever.
@@ -459,12 +465,20 @@ browserApi.tabCapture?.onStatusChanged?.addListener((info) => {
 
 // The captured tab's stream ended (e.g. Chrome released it when the user
 // switched tabs). The tab is usually still open, so re-capture it instead of
-// permanently stopping; only stop when the tab is really gone.
+// permanently stopping; only stop when the tab is really gone — or when Chrome
+// keeps killing the re-captured stream (cooldown), in which case we stop
+// cleanly so the UI reflects the real state instead of a thundering rearm loop.
 async function handleStreamStopped(): Promise<void> {
   const tabId = status.tabId;
   if (tabId) {
     try {
       await browserApi.tabs.get(tabId);
+      if (Date.now() - lastRearmTs < REARM_COOLDOWN_MS) {
+        logger.warn('re-captured stream keeps stopping; stopping capture cleanly');
+        await stopCapture();
+        return;
+      }
+      lastRearmTs = Date.now();
       logger.warn('tab capture stopped; re-capturing same tab');
       await rearmCapture();
       return;
