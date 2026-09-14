@@ -192,6 +192,43 @@ Models:
 
 ---
 
+## Publishing a release
+
+Releases are automated with GitHub Actions (`.github/workflows/release.yml`).
+Push a semver tag matching `v*`, and the pipeline builds and publishes
+everything:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow:
+
+1. Checks out the tag and installs dependencies from the lockfile (`npm ci`).
+2. Syncs the extension version to the tag — `package.json`, `package-lock.json`
+   and all three manifests get the tag version (without the `v`) on the CI
+   workspace, so ZIP names and the in-browser version match the Release.
+3. Runs `npm run typecheck`, then `npm run build:all`.
+4. Fails (before any Release is created) if any expected ZIP is missing.
+5. Publishes a GitHub Release marked **latest**, with auto-generated release
+   notes and the Chrome, Edge, and Firefox ZIPs attached:
+   - `release/livedub-chrome-v<VERSION>.zip`
+   - `release/livedub-edge-v<VERSION>.zip`
+   - `release/livedub-firefox-v<VERSION>.zip`
+
+New versions are the same flow:
+
+```bash
+git tag v1.1.0
+git push origin v1.1.0
+```
+
+> Do not force-push or delete a tag after it has been released — Release
+> records are immutable and rebuilding under the same tag creates confusion.
+
+---
+
 ## Security & privacy
 
 - Permissions are limited to `tabs`, `activeTab`, `tabCapture`, `storage`,

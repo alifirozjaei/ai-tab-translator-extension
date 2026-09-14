@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Least privilege: only enough to create a GitHub Release and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Guard against non-tag triggers
+        run: |
+          set -euo pipefail
+          # on.push.tags can also match a branch literally named like a tag;
+          # never run a production release from anything but a real tag ref.
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            echo "::error::ref ${GITHUB_REF_NAME} is not a tag; skipping release"
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # @vitejs/plugin-react requires ^20.19.0 || >=22.12.0
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies (lockfile)
+        run: npm ci
+
+      # The build (scripts/build.mjs) reads package.json "version" to name the
+      # ZIPs, and the manifests carry a literal "version" field. Sync all of
+      # them to the tag so artifacts, in-browser version, and the Release all
+      # say the same version. This only mutates the CI workspace; nothing is
+      # committed or pushed.
+      - name: Sync extension version to tag
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} is not a semver version (expected vX.Y.Z)"
+            exit 1
+          fi
+          echo "Building release artifacts for version ${VERSION}"
+          RELEASE_VERSION="$VERSION" node - <<'NODE'
+          const fs = require('fs');
+          const version = process.env.RELEASE_VERSION;
+          const files = [
+            'package.json',
+            'package-lock.json',
+            'manifest.json',
+            'manifest.edge.json',
+            'manifest.firefox.json',
+          ];
+          for (const file of files) {
+            const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+            json.version = version;
+            if (json.packages && json.packages['']) json.packages[''].version = version;
+            fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
+          }
+          NODE
+          git diff --stat -- package.json manifest.json manifest.edge.json manifest.firefox.json
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build all browser packages
+        run: npm run build:all
+
+      - name: Validate release artifacts
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          for target in chrome edge firefox; do
+            artifact="release/livedub-${target}-v${VERSION}.zip"
+            test -s "$artifact" || {
+              echo "::error::missing expected artifact ${artifact}"
+              exit 1
+            }
+            echo "ok: $artifact ($(stat -c %s "$artifact") bytes)"
+          done
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            "release/livedub-chrome-v${GITHUB_REF_NAME#v}.zip" \
+            "release/livedub-edge-v${GITHUB_REF_NAME#v}.zip" \
+            "release/livedub-firefox-v${GITHUB_REF_NAME#v}.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "LiveDub $GITHUB_REF_NAME" \
+            --generate-notes \
+            --latest
