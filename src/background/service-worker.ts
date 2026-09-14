@@ -54,8 +54,8 @@ function armStartingTimer(): void {
     startingTimer = null;
     if (status.state === 'starting') {
       logger.error('capture stuck in starting state; aborting');
-      void stopCapture().finally(() => {
-        status = { state: 'error', segments: 0, error: 'Capture did not start in time.' };
+      void stopCapture().finally(async () => {
+        status = { state: 'error', segments: (await getSegments()).length, error: 'Capture did not start in time.' };
         sessionVersion++;
         void persistSession();
       });
@@ -247,6 +247,7 @@ async function startCapture(settings: AppSettings): Promise<{ ok: boolean; error
   // misses the follow-up STATUS message.
   status = { state: 'active', tabId: tab.id, segments: (await getSegments()).length };
   sessionVersion++;
+  disarmStartingTimer();
   logger.info('capture started on tab', tab.id, 'mode:', settings.mode);
   armKeepAlive();
   armOffscreenWatchdog();

@@ -86,6 +86,9 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   // true when the fade must end with a full discard (interrupt stop); false
   // for the short fade-in of a new turn (keep the new audio).
   private pruneOnFadeEnd = false;
+  // false = fade-out (interrupt clears, 1 -> 0); true = fade-in (new turn
+  // starts silent and ramps up 0 -> 1). S1: the ramp direction must match.
+  private fadeIn = false;
 
   constructor(options?: AudioWorkletNodeOptions) {
     super();
@@ -106,6 +109,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     if (data.type === 'clear') {
       // Interrupt: fade the currently playing dub, then discard what remains.
       this.fading = true;
+      this.fadeIn = false;
       this.fadeTotal = Math.round(this.targetRate * 0.16);
       this.fadeRemain = this.fadeTotal;
       this.pruneOnFadeEnd = true;
@@ -123,11 +127,13 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   private appendInt16(i16: Int16Array): void {
     if (this.fading && this.pruneOnFadeEnd) {
       // A new turn arrived while the interrupt-fade was running: the old
-      // (cancelled) dub is dropped and the new audio fades in over ~1.3ms so
-      // there is no hard click (N11), and the new audio is NOT pruned.
+      // (cancelled) dub is dropped and the new audio ramps UP over ~10ms so
+      // there is no hard click (N11); the new audio is NOT pruned (S1: the
+      // fade-in ramp goes 0 -> 1, unlike the interrupt fade-out 1 -> 0).
       this.pr = this.pw;
       this.pc = 0;
       this.fading = true;
+      this.fadeIn = true;
       this.fadeTotal = Math.round(this.targetRate * 0.01);
       this.fadeRemain = this.fadeTotal;
       this.pruneOnFadeEnd = false;
@@ -162,7 +168,8 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       if (this.pc > 0 && now >= this.pendingTimes[this.pr] + this.delaySec) {
         let sample = this.pending[this.pr];
         if (this.fading) {
-          sample *= this.fadeTotal > 0 ? this.fadeRemain / this.fadeTotal : 0;
+          const k = this.fadeTotal > 0 ? this.fadeRemain / this.fadeTotal : 0;
+          sample *= this.fadeIn ? 1 - k : k;
           this.fadeRemain--;
           if (this.fadeRemain <= 0) {
             this.fading = false;

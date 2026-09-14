@@ -481,13 +481,21 @@ function enqueueSegment(data: any, settings: AppSettings): void {
     return;
   }
   queuedSegments++;
+  // Bind this segment to the session it was captured in: teardown bumps
+  // sessionGeneration, so a stop/start cycle cannot let the old session's
+  // queued audio run under the new session's settings (S4).
+  const generation = sessionGeneration;
   // Strictly serial: the next segment starts only after the previous one
   // settles, so dubbing order matches speech order (N7). `.finally` sits on the
   // chain link so each in-flight task decrements exactly once even if teardown
   // swaps `pipeline` (N3).
   pipeline = pipeline
-    .then(() =>
-      handleSegment(data, settings).catch((error) => {
+    .then(() => {
+      if (generation !== sessionGeneration || !running) {
+        log('segment ignored (stale session)');
+        return;
+      }
+      return handleSegment(data, settings).catch((error) => {
         const detail = describeError(error);
         log(`segment error: ${detail}`, 'error');
         logger.error('Segment processing failed. Full error:', error);
@@ -495,8 +503,8 @@ function enqueueSegment(data: any, settings: AppSettings): void {
         // keep listening. Only hard failures stop the capture.
         if (isTransientError(error)) return;
         reportError(error);
-      }),
-    )
+      });
+    })
     .finally(() => {
       queuedSegments--;
     });
